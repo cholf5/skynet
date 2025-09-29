@@ -3,6 +3,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Skynet.Core;
+using Xunit;
 
 namespace Skynet.Core.Tests;
 
@@ -42,6 +44,31 @@ public sealed class ActorSystemTests
 		var result = await resolved.CallAsync<int>(new Increment(1, TimeSpan.Zero));
 		result.Should().Be(1);
 		resolved.Handle.Should().Be(original.Handle);
+	}
+
+	[Fact]
+	public async Task SendAsync_ShouldDeliverFireAndForgetMessages()
+	{
+		await using var system = new ActorSystem();
+		var actor = await system.CreateActorAsync(() => new CounterActor());
+
+		await actor.SendAsync(new Increment(5, TimeSpan.Zero));
+		var value = await actor.CallAsync<int>(new GetCount());
+		value.Should().Be(5);
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldWorkWhenShortCircuitIsDisabled()
+	{
+		var options = new InProcTransportOptions
+		{
+			ShortCircuitLocalDelivery = false
+		};
+		await using var system = new ActorSystem(inProcOptions: options);
+		var actor = await system.CreateActorAsync(() => new CounterActor());
+
+		var value = await actor.CallAsync<int>(new Increment(1, TimeSpan.Zero));
+		value.Should().Be(1);
 	}
 
 	[Fact]

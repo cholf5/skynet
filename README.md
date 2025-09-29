@@ -62,7 +62,7 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - InProc Actor 运行时：基于 `System.Threading.Channels` 的邮箱，保证消息顺序与异常隔离。
 - `ActorSystem` 注册与查找：支持 handle/name 双索引、唯一服务与生命周期管理。
 - 消息语义：提供 `SendAsync`（fire-and-forget）与 `CallAsync`（请求-响应）API。
-- InProc Transport：本地消息短路，无需序列化。
+- InProc Transport：本地消息短路，无需序列化，可通过 `InProcTransportOptions` 切换为排队模式以模拟远程语义。
 - 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
 
 ## 声明接口并生成代理

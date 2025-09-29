@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
 using MessagePack;
@@ -17,6 +18,7 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly object _registryLock = new();
 	private readonly ILoggerFactory _loggerFactory;
 	private readonly ITransport _transport;
+	private readonly bool _ownsTransport;
 	private long _nextHandle;
 	private long _nextMessageId;
 	private bool _disposed;
@@ -26,10 +28,18 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// </summary>
 	/// <param name="loggerFactory">Factory used to create per-actor loggers.</param>
 	/// <param name="transport">Optional transport implementation. If not provided the in-process transport is used.</param>
-	public ActorSystem(ILoggerFactory? loggerFactory = null, ITransport? transport = null)
+	public ActorSystem(ILoggerFactory? loggerFactory = null, ITransport? transport = null, InProcTransportOptions? inProcOptions = null)
 	{
 		_loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
-		_transport = transport ?? new InProcTransport(this);
+		if (transport is null)
+		{
+			_transport = new InProcTransport(this, inProcOptions);
+			_ownsTransport = true;
+		}
+		else
+		{
+			_transport = transport;
+		}
 	}
 
 	/// <summary>
@@ -115,7 +125,6 @@ public sealed class ActorSystem : IAsyncDisposable
 
 		return new ActorRef(this, handle);
 	}
-}
 
 	public TContract GetService<TContract>(string name, MessagePackSerializerOptions? options = null) where TContract : class
 	{
@@ -319,6 +328,19 @@ public sealed class ActorSystem : IAsyncDisposable
 		foreach (var handleValue in snapshot)
 		{
 			await KillAsync(new ActorHandle(handleValue)).ConfigureAwait(false);
+		}
+
+		if (_ownsTransport)
+		{
+			switch (_transport)
+			{
+				case IAsyncDisposable asyncDisposable:
+					await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+					break;
+				case IDisposable disposable:
+					disposable.Dispose();
+					break;
+			}
 		}
 	}
 }
