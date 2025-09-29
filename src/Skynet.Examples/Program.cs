@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -8,6 +9,7 @@ using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
 using Skynet.Core;
+using Skynet.Extras;
 using Skynet.Net;
 
 namespace Skynet.Examples;
@@ -22,11 +24,23 @@ public static class Program
 			return;
 		}
 
-		if (args.Length >= 1 && string.Equals(args[0], "--gate", StringComparison.OrdinalIgnoreCase))
-		{
-			await RunGateSampleAsync().ConfigureAwait(false);
-			return;
-		}
+                if (args.Length >= 1)
+                {
+                        switch (args[0].ToLowerInvariant())
+                        {
+                                case "--gate":
+                                case "--rooms":
+                                        await RunRoomSampleAsync().ConfigureAwait(false);
+                                        return;
+                                case "--rooms-bench":
+                                        await RunRoomBenchmarkAsync().ConfigureAwait(false);
+                                        return;
+                                case "--cluster" when args.Length >= 2:
+                                        break;
+                                default:
+                                        break;
+                        }
+                }
 
 		await RunLocalSampleAsync().ConfigureAwait(false);
 	}
@@ -125,29 +139,65 @@ public static class Program
 		}
 	}
 
-	private static async Task RunGateSampleAsync()
-	{
-		Console.WriteLine("Starting gate server with Echo actor...");
-		await using var system = new ActorSystem();
-		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").ConfigureAwait(false);
-		var options = new GateServerOptions
-		{
-			TcpPort = 4001,
-			WebSocketPort = 4002,
-			RouterFactory = context => new EchoSessionRouter(echo.Handle)
-		};
+        private static async Task RunRoomSampleAsync()
+        {
+                Console.WriteLine("Starting gate server with room management...");
+                await using var system = new ActorSystem();
+                var manager = new RoomManager(system);
+                var options = new GateServerOptions
+                {
+                        TcpPort = 4010,
+                        WebSocketPort = 4011,
+                        RouterFactory = context => new RoomSessionRouter(manager)
+                };
 
-		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
-		await gate.StartAsync().ConfigureAwait(false);
+                await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
+                await gate.StartAsync().ConfigureAwait(false);
 
-		Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
-		Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
-		Console.WriteLine("Press ENTER to stop the gate server.");
-		Console.ReadLine();
+                Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
+                Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
+                Console.WriteLine("Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
+                Console.WriteLine("Press ENTER to stop the gate server.");
+                Console.ReadLine();
 
-		Console.WriteLine("Stopping gate server...");
-		await gate.StopAsync().ConfigureAwait(false);
-	}
+                Console.WriteLine("Stopping gate server...");
+                await gate.StopAsync().ConfigureAwait(false);
+        }
+
+        private static async Task RunRoomBenchmarkAsync()
+        {
+                const int sessionCount = 200;
+                const int iterations = 1000;
+                Console.WriteLine($"Running broadcast benchmark with {sessionCount} simulated sessions and {iterations} rounds...");
+
+                await using var system = new ActorSystem();
+                var manager = new RoomManager(system);
+                var actors = new List<RoomLoopbackActor>(sessionCount);
+
+                for (var i = 0; i < sessionCount; i++)
+                {
+                        var loopback = new RoomLoopbackActor();
+                        actors.Add(loopback);
+                        var actor = await system.CreateActorAsync(() => loopback).ConfigureAwait(false);
+                        var metadata = new SessionMetadata($"bench-{i}", "loop", null, DateTimeOffset.UtcNow);
+                        manager.Join("load-test", new RoomParticipant(actor.Handle, metadata));
+                }
+
+                var payload = Encoding.UTF8.GetBytes("benchmark");
+                var stopwatch = Stopwatch.StartNew();
+                for (var i = 0; i < iterations; i++)
+                {
+                        await manager.BroadcastAsync("load-test", payload).ConfigureAwait(false);
+                }
+                stopwatch.Stop();
+
+                var totalMessages = sessionCount * iterations;
+                var throughput = totalMessages / stopwatch.Elapsed.TotalSeconds;
+                Console.WriteLine($"Delivered {totalMessages} messages in {stopwatch.Elapsed.TotalMilliseconds:F2} ms.");
+                Console.WriteLine($"Throughput: {throughput:F2} messages/sec");
+                var perSession = actors.Count > 0 ? actors[0].Received : 0;
+                Console.WriteLine($"Per-session received: {perSession}");
+        }
 
 	private sealed class EchoActor : Actor
 	{
@@ -171,36 +221,22 @@ public static class Program
 
 	private sealed record EchoRequest(string Message);
 
-	private sealed class EchoSessionRouter : ISessionMessageRouter
-	{
-		private readonly ActorHandle _echo;
+        private sealed class RoomLoopbackActor : Actor
+        {
+                private long _received;
 
-		public EchoSessionRouter(ActorHandle echo)
-		{
-			_echo = echo;
-		}
+                public long Received => Interlocked.Read(ref _received);
 
-		public Task OnSessionStartedAsync(SessionContext context, CancellationToken cancellationToken)
-		{
-			Console.WriteLine($"[session] connected: {context.Metadata.SessionId} ({context.Metadata.Protocol})");
-			return Task.CompletedTask;
-		}
+                protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+                {
+                        if (envelope.Payload is SessionOutboundMessage)
+                        {
+                                Interlocked.Increment(ref _received);
+                        }
 
-		public async Task OnSessionMessageAsync(SessionContext context, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
-		{
-			var text = Encoding.UTF8.GetString(payload.Span);
-			Console.WriteLine($"[session] inbound '{text}'");
-			var reply = await context.CallAsync<string>(_echo, new EchoRequest(text), cancellationToken: cancellationToken).ConfigureAwait(false);
-			var bytes = Encoding.UTF8.GetBytes(reply);
-			await context.SendAsync(bytes, cancellationToken).ConfigureAwait(false);
-		}
-
-		public Task OnSessionClosedAsync(SessionContext context, SessionCloseReason reason, string? description, CancellationToken cancellationToken)
-		{
-			Console.WriteLine($"[session] closed: {context.Metadata.SessionId} ({reason}) {description}");
-			return Task.CompletedTask;
-		}
-	}
+                        return Task.FromResult<object?>(null);
+                }
+        }
 
 	[SkynetActor("login", Unique = true)]
 	public interface ILoginActor

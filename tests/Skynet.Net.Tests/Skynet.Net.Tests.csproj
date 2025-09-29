@@ -9,6 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Skynet.Net\Skynet.Net.csproj" />
     <ProjectReference Include="..\..\src\Skynet.Core\Skynet.Core.csproj" />
+    <ProjectReference Include="..\..\src\Skynet.Extras\Skynet.Extras.csproj" />
   </ItemGroup>
 
   <ItemGroup>

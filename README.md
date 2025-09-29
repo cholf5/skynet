@@ -121,18 +121,19 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster nod
 `Skynet.Net` 提供 `GateServer` 组件，将外部 TCP/WebSocket 客户端映射为内部 `SessionActor`：
 
 ```csharp
+var manager = new RoomManager(system);
 var options = new GateServerOptions
 {
 TcpPort = 2013,
 WebSocketPort = 8080,
-RouterFactory = context => new LoginGatewayRouter(system, login.Handle)
+RouterFactory = context => new RoomSessionRouter(manager)
 };
 
 await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
 await gate.StartAsync();
 ```
 
-自定义 `ISessionMessageRouter` 可以在会话开始时执行认证，在 `OnSessionMessageAsync` 中将客户端消息路由到游戏逻辑 actor，并通过 `SessionContext.SendAsync` 写回。框架内置：
+`RoomManager` 管理房间成员与广播消息，`RoomSessionRouter` 则提供基于文本命令的协议（`join`、`leave`、`say`、`who`、`rooms`、`nick`）。自定义 `ISessionMessageRouter` 可以在会话开始时执行认证，在 `OnSessionMessageAsync` 中将客户端消息路由到游戏逻辑 actor，并通过 `SessionContext.SendAsync` 写回。框架内置：
 
 - 长度前缀 TCP 帧与 WebSocket 二进制消息解析；
 - SessionActor 内部顺序化处理，支持将 `CallAsync` 转发到任意 actor；
@@ -141,10 +142,27 @@ await gate.StartAsync();
 
 停止 GateServer 时会向所有 SessionActor 发送 `SessionCloseMessage`，确保连接与会话资源被释放。
 
-在示例程序中可以通过 `--gate` 选项启动完整网关流程，方便与外部 TCP/WebSocket 客户端联调：
+在示例程序中可以通过 `--gate`/`--rooms` 选项启动房间广播示例，方便与外部 TCP/WebSocket 客户端联调：
 
 ```bash
 dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --gate
+```
+
+默认会将所有客户端加入 `lobby`，常用命令如下：
+
+```
+join <room>         # 加入房间
+leave <room>        # 离开房间
+say <room> <text>   # 广播消息
+rooms               # 查看当前已加入的房间
+who <room>          # 查询房间成员
+nick <alias>        # 修改别名
+```
+
+性能基准可以通过 `--rooms-bench` 触发，模拟 200 个会话进行 1000 轮广播并输出吞吐量：
+
+```bash
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --rooms-bench
 ```
 
 ## 贡献指南
