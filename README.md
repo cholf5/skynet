@@ -65,6 +65,7 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - InProc Transport：本地消息短路，无需序列化，可通过 `InProcTransportOptions` 切换为排队模式以模拟远程语义。
 - TcpTransport + 静态注册表：长度前缀帧、握手、心跳与错误处理，支持基于静态配置的跨进程 send/call。
 - GateServer：统一 TCP/WebSocket 接入，SessionActor 生命周期管理、心跳超时和断线重连策略，附带端到端集成测试。
+- DebugConsole 调试控制台：提供 Telnet/Netcat 接入、list/info/trace/kill 命令以及实时指标快照。
 - 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
 
 ## 声明接口并生成代理
@@ -173,3 +174,33 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --rooms-bench
 4. 遵循 [CONTRIBUTING.md](CONTRIBUTING.md) 与仓库编码规范（见 [AGENTS.md](AGENTS.md)）。
 
 欢迎通过 Issue、Discussion 或 PR 参与建设！
+
+## 调试控制台与指标
+
+`Skynet.Extras` 引入了基于 TCP 的 DebugConsole，可用于快速查看 Actor 列表、队列长度、累计处理次数以及异常统计，同时支持即时开启或关闭特定 Actor 的 trace 日志。
+
+```bash
+# 启动示例并开放调试控制台 (默认 127.0.0.1:4015)
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --debug-console
+```
+
+启动后可以使用 `telnet` 或 `nc` 连接：
+
+```bash
+telnet 127.0.0.1 4015
+# 或
+nc 127.0.0.1 4015
+```
+
+常用命令：
+
+```
+help                     # 查看命令说明
+list                     # 展示所有 Actor 的队列长度、处理次数与 trace 状态
+info <id|name>           # 查看单个 Actor 的详细指标快照
+trace <id|name> [on|off] # 切换或设置 trace 记录
+kill <id|name>           # 请求停止指定 Actor
+exit                     # 关闭当前连接
+```
+
+DebugConsole 基于 `ActorMetricsCollector` 采集数据，所有指标均以本地快照方式返回，不依赖外部监控系统。

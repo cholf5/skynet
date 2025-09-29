@@ -19,4 +19,8 @@ public sealed class ActorSystemOptions
 	/// Gets or sets the cluster registry used to resolve remote actors.
 	/// </summary>
 	public IClusterRegistry? ClusterRegistry { get; init; }
+	/// <summary>
+	/// Gets or sets the metrics collector used by the actor system.
+	/// </summary>
+	public ActorMetricsCollector? MetricsCollector { get; init; }
 }

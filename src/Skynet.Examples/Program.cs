@@ -24,23 +24,26 @@ public static class Program
 			return;
 		}
 
-                if (args.Length >= 1)
-                {
-                        switch (args[0].ToLowerInvariant())
-                        {
-                                case "--gate":
-                                case "--rooms":
-                                        await RunRoomSampleAsync().ConfigureAwait(false);
-                                        return;
-                                case "--rooms-bench":
-                                        await RunRoomBenchmarkAsync().ConfigureAwait(false);
-                                        return;
-                                case "--cluster" when args.Length >= 2:
-                                        break;
-                                default:
-                                        break;
-                        }
-                }
+		if (args.Length >= 1)
+		{
+			switch (args[0].ToLowerInvariant())
+			{
+				case "--gate":
+				case "--rooms":
+				await RunRoomSampleAsync().ConfigureAwait(false);
+				return;
+				case "--debug-console":
+				await RunDebugConsoleSampleAsync().ConfigureAwait(false);
+				return;
+				case "--rooms-bench":
+				await RunRoomBenchmarkAsync().ConfigureAwait(false);
+				return;
+				case "--cluster" when args.Length >= 2:
+				break;
+				default:
+				break;
+			}
+		}
 
 		await RunLocalSampleAsync().ConfigureAwait(false);
 	}
@@ -139,65 +142,88 @@ public static class Program
 		}
 	}
 
-        private static async Task RunRoomSampleAsync()
-        {
-                Console.WriteLine("Starting gate server with room management...");
-                await using var system = new ActorSystem();
-                var manager = new RoomManager(system);
-                var options = new GateServerOptions
-                {
-                        TcpPort = 4010,
-                        WebSocketPort = 4011,
-                        RouterFactory = context => new RoomSessionRouter(manager)
-                };
 
-                await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
-                await gate.StartAsync().ConfigureAwait(false);
+	private static async Task RunDebugConsoleSampleAsync()
+	{
+		Console.WriteLine("Starting actor system with debug console on 127.0.0.1:4015...");
+		await using var system = new ActorSystem();
+		await system.CreateActorAsync(() => new EchoActor(), "echo").ConfigureAwait(false);
+		var gateway = new ActorSystemDebugConsoleGateway(system);
+		var options = new DebugConsoleOptions
+		{
+			Host = "127.0.0.1",
+			Port = 4015
+		};
 
-                Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
-                Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
-                Console.WriteLine("Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
-                Console.WriteLine("Press ENTER to stop the gate server.");
-                Console.ReadLine();
+		await using var console = new DebugConsoleServer(gateway, options);
+		await console.StartAsync().ConfigureAwait(false);
 
-                Console.WriteLine("Stopping gate server...");
-                await gate.StopAsync().ConfigureAwait(false);
-        }
+		Console.WriteLine("Connect with `telnet 127.0.0.1 4015` and type 'help' to inspect actors.");
+		Console.WriteLine("Press ENTER to stop the console.");
+		Console.ReadLine();
 
-        private static async Task RunRoomBenchmarkAsync()
-        {
-                const int sessionCount = 200;
-                const int iterations = 1000;
-                Console.WriteLine($"Running broadcast benchmark with {sessionCount} simulated sessions and {iterations} rounds...");
+		await console.StopAsync().ConfigureAwait(false);
+	}
 
-                await using var system = new ActorSystem();
-                var manager = new RoomManager(system);
-                var actors = new List<RoomLoopbackActor>(sessionCount);
+	private static async Task RunRoomSampleAsync()
+	{
+		Console.WriteLine("Starting gate server with room management...");
+		await using var system = new ActorSystem();
+		var manager = new RoomManager(system);
+		var options = new GateServerOptions
+		{
+			TcpPort = 4010,
+			WebSocketPort = 4011,
+			RouterFactory = context => new RoomSessionRouter(manager)
+		};
 
-                for (var i = 0; i < sessionCount; i++)
-                {
-                        var loopback = new RoomLoopbackActor();
-                        actors.Add(loopback);
-                        var actor = await system.CreateActorAsync(() => loopback).ConfigureAwait(false);
-                        var metadata = new SessionMetadata($"bench-{i}", "loop", null, DateTimeOffset.UtcNow);
-                        manager.Join("load-test", new RoomParticipant(actor.Handle, metadata));
-                }
+		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
+		await gate.StartAsync().ConfigureAwait(false);
 
-                var payload = Encoding.UTF8.GetBytes("benchmark");
-                var stopwatch = Stopwatch.StartNew();
-                for (var i = 0; i < iterations; i++)
-                {
-                        await manager.BroadcastAsync("load-test", payload).ConfigureAwait(false);
-                }
-                stopwatch.Stop();
+		Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
+		Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
+		Console.WriteLine("Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
+		Console.WriteLine("Press ENTER to stop the gate server.");
+		Console.ReadLine();
 
-                var totalMessages = sessionCount * iterations;
-                var throughput = totalMessages / stopwatch.Elapsed.TotalSeconds;
-                Console.WriteLine($"Delivered {totalMessages} messages in {stopwatch.Elapsed.TotalMilliseconds:F2} ms.");
-                Console.WriteLine($"Throughput: {throughput:F2} messages/sec");
-                var perSession = actors.Count > 0 ? actors[0].Received : 0;
-                Console.WriteLine($"Per-session received: {perSession}");
-        }
+		Console.WriteLine("Stopping gate server...");
+		await gate.StopAsync().ConfigureAwait(false);
+	}
+
+	private static async Task RunRoomBenchmarkAsync()
+	{
+		const int sessionCount = 200;
+		const int iterations = 1000;
+		Console.WriteLine($"Running broadcast benchmark with {sessionCount} simulated sessions and {iterations} rounds...");
+
+		await using var system = new ActorSystem();
+		var manager = new RoomManager(system);
+		var actors = new List<RoomLoopbackActor>(sessionCount);
+
+		for (var i = 0; i < sessionCount; i++)
+		{
+			var loopback = new RoomLoopbackActor();
+			actors.Add(loopback);
+			var actor = await system.CreateActorAsync(() => loopback).ConfigureAwait(false);
+			var metadata = new SessionMetadata($"bench-{i}", "loop", null, DateTimeOffset.UtcNow);
+			manager.Join("load-test", new RoomParticipant(actor.Handle, metadata));
+		}
+
+		var payload = Encoding.UTF8.GetBytes("benchmark");
+		var stopwatch = Stopwatch.StartNew();
+		for (var i = 0; i < iterations; i++)
+		{
+			await manager.BroadcastAsync("load-test", payload).ConfigureAwait(false);
+		}
+		stopwatch.Stop();
+
+		var totalMessages = sessionCount * iterations;
+		var throughput = totalMessages / stopwatch.Elapsed.TotalSeconds;
+		Console.WriteLine($"Delivered {totalMessages} messages in {stopwatch.Elapsed.TotalMilliseconds:F2} ms.");
+		Console.WriteLine($"Throughput: {throughput:F2} messages/sec");
+		var perSession = actors.Count > 0 ? actors[0].Received : 0;
+		Console.WriteLine($"Per-session received: {perSession}");
+	}
 
 	private sealed class EchoActor : Actor
 	{
@@ -206,13 +232,13 @@ public static class Program
 			switch (envelope.Payload)
 			{
 				case EchoNotice notice:
-					Console.WriteLine($"[send] {notice.Message}");
-					return Task.FromResult<object?>(null);
+				Console.WriteLine($"[send] {notice.Message}");
+				return Task.FromResult<object?>(null);
 				case EchoRequest request:
-					Console.WriteLine($"[call] {request.Message}");
-					return Task.FromResult<object?>(request.Message);
+				Console.WriteLine($"[call] {request.Message}");
+				return Task.FromResult<object?>(request.Message);
 				default:
-					throw new InvalidOperationException($"Unknown message type {envelope.Payload?.GetType().Name}.");
+				throw new InvalidOperationException($"Unknown message type {envelope.Payload?.GetType().Name}.");
 			}
 		}
 	}
@@ -221,22 +247,22 @@ public static class Program
 
 	private sealed record EchoRequest(string Message);
 
-        private sealed class RoomLoopbackActor : Actor
-        {
-                private long _received;
+	private sealed class RoomLoopbackActor : Actor
+	{
+		private long _received;
 
-                public long Received => Interlocked.Read(ref _received);
+		public long Received => Interlocked.Read(ref _received);
 
-                protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
-                {
-                        if (envelope.Payload is SessionOutboundMessage)
-                        {
-                                Interlocked.Increment(ref _received);
-                        }
+		protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+		{
+			if (envelope.Payload is SessionOutboundMessage)
+			{
+				Interlocked.Increment(ref _received);
+			}
 
-                        return Task.FromResult<object?>(null);
-                }
-        }
+			return Task.FromResult<object?>(null);
+		}
+	}
 
 	[SkynetActor("login", Unique = true)]
 	public interface ILoginActor
