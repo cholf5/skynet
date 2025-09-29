@@ -69,15 +69,10 @@ Kanban 数据记录在 `./kanban/` 目录（Markdown 格式）.
 
 ## 2. C# 编码规范
 
-* **语言版本**：C# 12 (net8.0)
-* **缩进**：4 空格，不使用 Tab
-* **大括号**：K&R 风格
-
-  ```csharp
-  if (x) {
-      ...
-  }
-  ```
+* **语言版本**：C# 13 (net9.0)
+* **缩进**：Tab（宽度 4）
+* **文件编码**：UTF-8 (no BOM)
+* **大括号**：Allman 风格（{ 独占一行）
 * **类命名**：PascalCase（`ActorSystem`, `ActorRef`）
 * **方法命名**：PascalCase（`Send`, `CallAsync`）
 * **变量命名**：camelCase（`actorRef`, `channel`）
@@ -85,6 +80,8 @@ Kanban 数据记录在 `./kanban/` 目录（Markdown 格式）.
 * **常量**：大写 + 下划线（`MAX_QUEUE_LENGTH`）
 * **接口**：以 `I` 开头（`IActor`, `ILoginService`）
 * **泛型参数**：以 `T` 开头（`TMessage`, `TResponse`）
+* 禁止 var 滥用，只有在类型显而易见时才允许 var
+* 使用表达式主体 (=>) 时必须保持简洁，不要写复杂逻辑
 
 ---
 
