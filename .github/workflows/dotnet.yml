@@ -1,0 +1,28 @@
+name: .NET CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.100-rc.1.24452.12
+
+      - name: Restore
+        run: dotnet restore Skynet.sln
+
+      - name: Build
+        run: dotnet build Skynet.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Skynet.sln --configuration Release --no-build --collect:"XPlat Code Coverage"
