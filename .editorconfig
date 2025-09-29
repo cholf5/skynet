@@ -1,0 +1,17 @@
+root = true
+
+[*]
+indent_style = tab
+indent_size = 4
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.cs]
+csharp_new_line_before_open_brace = all
+csharp_indent_block_contents = true
+csharp_prefer_braces = true:suggestion
+csharp_style_namespace_declarations = block_scoped:suggestion
+csharp_style_prefer_top_level_statements = false:suggestion
+csharp_preserve_single_line_blocks = false
