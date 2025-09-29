@@ -1,7 +1,6 @@
 # Kanban Board
 
 ## Backlog
-- [ ] [A-3 SourceGenerator & MessagePack Integration](issues/A-3-source-generator.md) — Owner: AI Agent — Complexity: L
 - [ ] [A-4 InProc Transport & Echo Sample](issues/A-4-inproc-transport.md) — Owner: AI Agent — Complexity: M
 - [ ] [A-5 TCP Transport & Static Registry](issues/A-5-tcp-transport.md) — Owner: AI Agent — Complexity: L
 - [ ] [A-6 GateServer & Session Pipeline](issues/A-6-gate-session.md) — Owner: AI Agent — Complexity: L
@@ -26,5 +25,6 @@
 - _None_
 
 ## Done
+- [x] [A-3 SourceGenerator & MessagePack Integration](issues/A-3-source-generator.md) — Owner: AI Agent — Complexity: L
 - [x] [A-2 Core Actor Runtime & InProc Transport](issues/A-2-core-actor-runtime.md) — Owner: AI Agent — Complexity: L
 - [x] [A-0 Initialize Kanban Workflow](issues/A-0-initialize-kanban.md) — Owner: AI Agent — Complexity: S

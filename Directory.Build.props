@@ -1,11 +1,14 @@
 <Project>
-<PropertyGroup>
-<TargetFramework>net9.0</TargetFramework>
-<Nullable>enable</Nullable>
-<ImplicitUsings>enable</ImplicitUsings>
-<LangVersion>preview</LangVersion>
-<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-<AnalysisLevel>preview</AnalysisLevel>
-		<ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-</PropertyGroup>
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>preview</AnalysisLevel>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Skynet.Generators'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Skynet.Generators/Skynet.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
 </Project>

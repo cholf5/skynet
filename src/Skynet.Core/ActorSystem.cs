@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
+using MessagePack;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -107,13 +108,19 @@ public sealed class ActorSystem : IAsyncDisposable
 	{
 		ArgumentException.ThrowIfNullOrEmpty(name);
 		ThrowIfDisposed();
-
 		if (!_nameToHandle.TryGetValue(name, out var handle))
 		{
 			throw new KeyNotFoundException($"Actor '{name}' does not exist.");
 		}
 
 		return new ActorRef(this, handle);
+	}
+}
+
+	public TContract GetService<TContract>(string name, MessagePackSerializerOptions? options = null) where TContract : class
+	{
+		var reference = GetByName(name);
+		return reference.CreateProxy<TContract>(options);
 	}
 
 	/// <summary>
@@ -191,7 +198,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		try
 		{
 			var envelope = CreateEnvelope(to, from ?? ActorHandle.None, CallType.Call, payload);
-			await RouteAsync(envelope, response, cancellationToken).ConfigureAwait(false);
+			await RouteAsync(envelope, response, effectiveToken).ConfigureAwait(false);
 			var result = await response.Task.ConfigureAwait(false);
 			return (TResponse)result!;
 		}

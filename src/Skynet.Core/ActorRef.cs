@@ -1,4 +1,5 @@
 using System.Threading.Tasks;
+using MessagePack;
 namespace Skynet.Core;
 
 /// <summary>
@@ -38,6 +39,11 @@ public sealed class ActorRef
 	/// <param name="cancellationToken">Token used to cancel the operation.</param>
 	public Task<TResponse> CallAsync<TResponse>(object payload, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
 	{
-		return System.CallAsync<TResponse>(Handle, payload, timeout, cancellationToken: cancellationToken);
+	return System.CallAsync<TResponse>(Handle, payload, timeout, cancellationToken: cancellationToken);
 	}
-}
+
+	public TContract CreateProxy<TContract>(MessagePackSerializerOptions? options = null) where TContract : class
+	{
+	return RpcContractRegistry.CreateProxy<TContract>(this, options);
+	}
+	}
