@@ -72,15 +72,15 @@ public static class MessageEnvelopeSerializer
 		var timestamp = new DateTimeOffset(dto.Timestamp, TimeSpan.Zero);
 		var ttl = dto.TimeToLiveTicks.HasValue ? TimeSpan.FromTicks(dto.TimeToLiveTicks.Value) : null;
 
-		return new MessageEnvelope(
-			dto.MessageId,
-			new ActorHandle(dto.From),
-			new ActorHandle(dto.To),
-			dto.CallType,
-			payload!,
-			dto.TraceId,
-			timestamp,
-			tl,
-			dto.Version);
-	}
+return new MessageEnvelope(
+dto.MessageId,
+new ActorHandle(dto.From),
+new ActorHandle(dto.To),
+dto.CallType,
+payload!,
+dto.TraceId,
+timestamp,
+ttl,
+dto.Version);
+}
 }

@@ -16,10 +16,12 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly ConcurrentDictionary<string, ActorHandle> _nameToHandle = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<long, string> _handleToName = new();
 	private readonly object _registryLock = new();
-	private readonly ILoggerFactory _loggerFactory;
-	private readonly ITransport _transport;
-	private readonly bool _ownsTransport;
-	private long _nextHandle;
+private readonly ILoggerFactory _loggerFactory;
+private readonly ITransport _transport;
+private readonly bool _ownsTransport;
+private readonly long _handleOffset;
+private readonly IClusterRegistry? _clusterRegistry;
+private long _nextHandle;
 	private long _nextMessageId;
 	private bool _disposed;
 
@@ -28,19 +30,21 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// </summary>
 	/// <param name="loggerFactory">Factory used to create per-actor loggers.</param>
 	/// <param name="transport">Optional transport implementation. If not provided the in-process transport is used.</param>
-	public ActorSystem(ILoggerFactory? loggerFactory = null, ITransport? transport = null, InProcTransportOptions? inProcOptions = null)
-	{
-		_loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
-		if (transport is null)
-		{
-			_transport = new InProcTransport(this, inProcOptions);
-			_ownsTransport = true;
-		}
-		else
-		{
-			_transport = transport;
-		}
-	}
+public ActorSystem(ILoggerFactory? loggerFactory = null, ITransport? transport = null, InProcTransportOptions? inProcOptions = null, ActorSystemOptions? options = null, Func<ActorSystem, ITransport>? transportFactory = null)
+{
+_loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+_handleOffset = options?.HandleOffset ?? 0;
+_clusterRegistry = options?.ClusterRegistry;
+if (transport is not null)
+{
+_transport = transport;
+}
+else
+{
+_transport = transportFactory is not null ? transportFactory(this) : new InProcTransport(this, inProcOptions);
+_ownsTransport = true;
+}
+}
 
 	/// <summary>
 	/// Creates a new actor instance and registers it with the system.
@@ -50,34 +54,45 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// <param name="name">Optional logical name for the actor.</param>
 	/// <param name="cancellationToken">Token used to cancel the creation.</param>
 	/// <returns>A reference to the newly created actor.</returns>
-	public async Task<ActorRef> CreateActorAsync<TActor>(Func<TActor> factory, string? name = null, CancellationToken cancellationToken = default) where TActor : Actor
-	{
-		ArgumentNullException.ThrowIfNull(factory);
-		ThrowIfDisposed();
+public async Task<ActorRef> CreateActorAsync<TActor>(Func<TActor> factory, string? name = null, ActorCreationOptions? creationOptions = null, CancellationToken cancellationToken = default) where TActor : Actor
+{
+ArgumentNullException.ThrowIfNull(factory);
+ThrowIfDisposed();
 
-		var actor = factory() ?? throw new InvalidOperationException("The actor factory returned null.");
-		var handle = new ActorHandle(Interlocked.Increment(ref _nextHandle));
+var actor = factory() ?? throw new InvalidOperationException("The actor factory returned null.");
+var handleValue = creationOptions?.HandleOverride?.Value ?? _handleOffset + Interlocked.Increment(ref _nextHandle);
+var handle = new ActorHandle(handleValue);
+if (!handle.IsValid)
+{
+throw new InvalidOperationException("The actor handle must be greater than zero.");
+}
+var actorName = string.IsNullOrWhiteSpace(name) ? null : name;
 		var logger = _loggerFactory.CreateLogger(actor.GetType());
 		var host = new ActorHost(this, handle, actor, logger);
 
-		lock (_registryLock)
-		{
-			if (!_actors.TryAdd(handle.Value, host))
-			{
-				throw new InvalidOperationException($"Actor handle {handle.Value} is already registered.");
-			}
+lock (_registryLock)
+{
+if (!_actors.TryAdd(handle.Value, host))
+{
+throw new InvalidOperationException($"Actor handle {handle.Value} is already registered.");
+}
 
-			if (!string.IsNullOrWhiteSpace(name))
-			{
-				if (_nameToHandle.ContainsKey(name))
-				{
-					_actors.TryRemove(handle.Value, out _);
-					throw new InvalidOperationException($"The actor name '{name}' is already registered.");
-				}
-				_nameToHandle[name] = handle;
-				_handleToName[handle.Value] = name;
-			}
-		}
+if (actorName is not null)
+{
+if (_nameToHandle.ContainsKey(actorName))
+{
+_actors.TryRemove(handle.Value, out _);
+throw new InvalidOperationException($"The actor name '{actorName}' is already registered.");
+}
+_nameToHandle[actorName] = handle;
+_handleToName[handle.Value] = actorName;
+}
+}
+
+if (actorName is not null && _clusterRegistry is not null)
+{
+_clusterRegistry.RegisterLocalActor(actorName, handle);
+}
 
 		try
 		{
@@ -114,17 +129,22 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// <summary>
 	/// Retrieves an actor reference by name.
 	/// </summary>
-	public ActorRef GetByName(string name)
-	{
-		ArgumentException.ThrowIfNullOrEmpty(name);
-		ThrowIfDisposed();
-		if (!_nameToHandle.TryGetValue(name, out var handle))
-		{
-			throw new KeyNotFoundException($"Actor '{name}' does not exist.");
-		}
+public ActorRef GetByName(string name)
+{
+ArgumentException.ThrowIfNullOrEmpty(name);
+ThrowIfDisposed();
+if (_nameToHandle.TryGetValue(name, out var handle))
+{
+return new ActorRef(this, handle);
+}
 
-		return new ActorRef(this, handle);
-	}
+if (_clusterRegistry is not null && _clusterRegistry.TryResolveByName(name, out var location))
+{
+return new ActorRef(this, location.Handle);
+}
+
+throw new KeyNotFoundException($"Actor '{name}' does not exist.");
+}
 
 	public TContract GetService<TContract>(string name, MessagePackSerializerOptions? options = null) where TContract : class
 	{
@@ -154,15 +174,15 @@ public sealed class ActorSystem : IAsyncDisposable
 			return new ActorRef(this, existing);
 		}
 
-		try
-		{
-			return await CreateActorAsync(factory, name, cancellationToken).ConfigureAwait(false);
-		}
-		catch (InvalidOperationException) when (_nameToHandle.TryGetValue(name, out existing))
-		{
-			return new ActorRef(this, existing);
-		}
-	}
+try
+{
+return await CreateActorAsync(factory, name, null, cancellationToken).ConfigureAwait(false);
+}
+catch (InvalidOperationException) when (_nameToHandle.TryGetValue(name, out existing))
+{
+return new ActorRef(this, existing);
+}
+}
 
 	/// <summary>
 	/// Sends a fire-and-forget message to the specified actor.
@@ -264,18 +284,23 @@ public sealed class ActorSystem : IAsyncDisposable
 		return result;
 	}
 
-	internal async ValueTask DeliverLocalAsync(MessageEnvelope envelope, TaskCompletionSource<object?>? response, CancellationToken cancellationToken)
-	{
-		if (!_actors.TryGetValue(envelope.To.Value, out var host))
-		{
-			var exception = new InvalidOperationException($"Actor with handle {envelope.To.Value} was not found.");
-			response?.TrySetException(exception);
-			throw exception;
-		}
+internal async ValueTask DeliverLocalAsync(MessageEnvelope envelope, TaskCompletionSource<object?>? response, CancellationToken cancellationToken)
+{
+if (!_actors.TryGetValue(envelope.To.Value, out var host))
+{
+var exception = new InvalidOperationException($"Actor with handle {envelope.To.Value} was not found.");
+response?.TrySetException(exception);
+throw exception;
+}
 
-		await host.Startup.WaitAsync(cancellationToken).ConfigureAwait(false);
-		await host.EnqueueAsync(new MailboxMessage(envelope, response), cancellationToken).ConfigureAwait(false);
-	}
+await host.Startup.WaitAsync(cancellationToken).ConfigureAwait(false);
+await host.EnqueueAsync(new MailboxMessage(envelope, response), cancellationToken).ConfigureAwait(false);
+}
+
+internal bool TryGetActorHost(ActorHandle handle, out ActorHost host)
+{
+return _actors.TryGetValue(handle.Value, out host);
+}
 
 	private ValueTask RouteAsync(MessageEnvelope envelope, TaskCompletionSource<object?>? response, CancellationToken cancellationToken)
 	{

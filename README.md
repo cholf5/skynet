@@ -63,6 +63,7 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - `ActorSystem` 注册与查找：支持 handle/name 双索引、唯一服务与生命周期管理。
 - 消息语义：提供 `SendAsync`（fire-and-forget）与 `CallAsync`（请求-响应）API。
 - InProc Transport：本地消息短路，无需序列化，可通过 `InProcTransportOptions` 切换为排队模式以模拟远程语义。
+- TcpTransport + 静态注册表：长度前缀帧、握手、心跳与错误处理，支持基于静态配置的跨进程 send/call。
 - 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
 
 ## 声明接口并生成代理
@@ -99,6 +100,20 @@ public sealed record LoginRequest([property: Key(0)] string Username, [property:
 ```
 
 运行时可以通过 `ActorSystem.GetService<ILoginActor>("login")` 获取强类型代理，调用时自动封送并保证 `Send` / `Call` 语义，同时默认使用 MessagePack 进行序列化。
+
+## 跨进程示例
+
+仓库提供一个最小的两节点 TCP 示例，演示如何通过静态注册表和 `TcpTransport` 建立跨进程调用：
+
+```bash
+# 终端 1：node1 监听 127.0.0.1:9101 并托管 echo actor
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster node1
+
+# 终端 2：node2 通过 TcpTransport 调用远程 echo actor
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster node2
+```
+
+`node1` 输出 “Node1 listening on 127.0.0.1:9101” 后保持运行，`node2` 可以在命令行输入消息，通过 `CallAsync` 获取远程响应。示例使用长度前缀帧、握手与心跳保活，同时利用 `StaticClusterRegistry` 将服务名称映射到节点与已知 actor handle。
 
 ## 贡献指南
 

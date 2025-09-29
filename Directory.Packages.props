@@ -7,6 +7,7 @@
 <PackageVersion Include="FluentAssertions" Version="6.12.0" />
 <PackageVersion Include="MessagePack" Version="2.6.118" />
 <PackageVersion Include="MessagePack.Annotations" Version="2.6.118" />
+<PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
 <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
 </ItemGroup>
 </Project>
