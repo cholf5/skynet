@@ -4,13 +4,13 @@
 实现 Milestone 1 的核心功能：Actor 基类、ActorSystem/ActorHost、本地 handle/name registry 以及 InProc Transport，提供 Echo 示例与单元测试。
 
 ## Subtasks
-- [ ] 设计并实现 `Actor` 抽象，基于 `System.Threading.Channels` 构建邮箱，确保顺序执行与异常隔离。
-- [ ] 实现 `ActorSystem`/`ActorHost`，完成服务注册、handle/name 映射、生命周期管理与唯一服务支持。
-- [ ] 提供 `Send`/`Call` API，支持 fire-and-forget 与请求-响应语义，并确保本地短路逻辑。
-- [ ] 构建 InProc transport 抽象，打通消息 Envelope 流程。
-- [ ] 编写 Echo 示例（位于 `src/Skynet.Examples/EchoServer`）展示基本调用链路。
-- [ ] 为核心行为编写单元测试与基础性能测试（吞吐/延迟烟雾测试）。
-- [ ] 更新文档（README/示例说明）并在 Kanban issue 中记录遇到的问题与解决方案。
+- [x] 设计并实现 `Actor` 抽象，基于 `System.Threading.Channels` 构建邮箱，确保顺序执行与异常隔离。
+- [x] 实现 `ActorSystem`/`ActorHost`，完成服务注册、handle/name 映射、生命周期管理与唯一服务支持。
+- [x] 提供 `Send`/`Call` API，支持 fire-and-forget 与请求-响应语义，并确保本地短路逻辑。
+- [x] 构建 InProc transport 抽象，打通消息 Envelope 流程。
+- [x] 编写 Echo 示例（位于 `src/Skynet.Examples/EchoServer`）展示基本调用链路。
+- [x] 为核心行为编写单元测试与基础性能测试（吞吐/延迟烟雾测试）。
+- [x] 更新文档（README/示例说明）并在 Kanban issue 中记录遇到的问题与解决方案。
 
 ## Developer
 - Owner: AI Agent
@@ -36,3 +36,4 @@
 
 ## Notes & Updates
 - 2025-09-29：任务创建，等待仓库骨架准备完成后启动。
+- 2025-09-30：完成 Actor 基础运行时、InProc Transport、Echo 示例与核心单元测试，所有验收用例通过。

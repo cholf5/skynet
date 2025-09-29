@@ -36,18 +36,36 @@ Skynet.sln
 git clone https://github.com/<your-org>/Skynet.git
 cd Skynet
 
-# 还原依赖
-dotnet restore
-
-# 构建所有项目
+# 还原依赖并构建
 dotnet build
 
-# 执行测试
-dotnet test
+# 执行核心测试套件
+dotnet test tests/Skynet.Core.Tests/Skynet.Core.Tests.csproj
 
-# 运行示例（占位输出）
+# 运行 Echo 示例
 dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj
 ```
+
+示例程序会启动一个本地 `ActorSystem` 并注册名为 `echo` 的服务：
+
+```text
+Bootstrapping Skynet in-process echo sample...
+Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an empty line to exit.
+> hello
+[send] hello
+[call] hello
+[reply] hello
+```
+
+按回车退出后，ActorSystem 会自动释放。
+
+## 核心能力
+
+- InProc Actor 运行时：基于 `System.Threading.Channels` 的邮箱，保证消息顺序与异常隔离。
+- `ActorSystem` 注册与查找：支持 handle/name 双索引、唯一服务与生命周期管理。
+- 消息语义：提供 `SendAsync`（fire-and-forget）与 `CallAsync`（请求-响应）API。
+- InProc Transport：本地消息短路，无需序列化。
+- 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
 
 ## 贡献指南
 
