@@ -64,6 +64,7 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - 消息语义：提供 `SendAsync`（fire-and-forget）与 `CallAsync`（请求-响应）API。
 - InProc Transport：本地消息短路，无需序列化，可通过 `InProcTransportOptions` 切换为排队模式以模拟远程语义。
 - TcpTransport + 静态注册表：长度前缀帧、握手、心跳与错误处理，支持基于静态配置的跨进程 send/call。
+- GateServer：统一 TCP/WebSocket 接入，SessionActor 生命周期管理、心跳超时和断线重连策略，附带端到端集成测试。
 - 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
 
 ## 声明接口并生成代理
@@ -114,6 +115,37 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster nod
 ```
 
 `node1` 输出 “Node1 listening on 127.0.0.1:9101” 后保持运行，`node2` 可以在命令行输入消息，通过 `CallAsync` 获取远程响应。示例使用长度前缀帧、握手与心跳保活，同时利用 `StaticClusterRegistry` 将服务名称映射到节点与已知 actor handle。
+
+## 外部客户端接入 GateServer
+
+`Skynet.Net` 提供 `GateServer` 组件，将外部 TCP/WebSocket 客户端映射为内部 `SessionActor`：
+
+```csharp
+var options = new GateServerOptions
+{
+TcpPort = 2013,
+WebSocketPort = 8080,
+RouterFactory = context => new LoginGatewayRouter(system, login.Handle)
+};
+
+await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
+await gate.StartAsync();
+```
+
+自定义 `ISessionMessageRouter` 可以在会话开始时执行认证，在 `OnSessionMessageAsync` 中将客户端消息路由到游戏逻辑 actor，并通过 `SessionContext.SendAsync` 写回。框架内置：
+
+- 长度前缀 TCP 帧与 WebSocket 二进制消息解析；
+- SessionActor 内部顺序化处理，支持将 `CallAsync` 转发到任意 actor；
+- 断线与心跳事件通过 `OnSessionClosedAsync` 反馈，可在关闭时清理玩家状态；
+- 集成测试覆盖 TCP/WebSocket 往返、重连与超时场景（见 `tests/Skynet.Net.Tests/GateServerTests.cs`）。
+
+停止 GateServer 时会向所有 SessionActor 发送 `SessionCloseMessage`，确保连接与会话资源被释放。
+
+在示例程序中可以通过 `--gate` 选项启动完整网关流程，方便与外部 TCP/WebSocket 客户端联调：
+
+```bash
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --gate
+```
 
 ## 贡献指南
 
