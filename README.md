@@ -57,6 +57,17 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 
 按回车退出后，ActorSystem 会自动释放。
 
+## 文档索引
+
+- [项目概览](docs/overview.md)
+- [快速上手指南](docs/getting-started.md)
+- [架构设计解读](docs/architecture.md)
+- [项目需求文档（PRD）](docs/PRD.md)
+- [发布流程指南](docs/release-guide.md)
+- [Redis 注册中心说明](docs/redis-registry.md)
+- [调试控制台说明](docs/debug-console.md)
+- [房间系统指南](docs/rooms.md)
+
 ## 核心能力
 
 - InProc Actor 运行时：基于 `System.Threading.Channels` 的邮箱，保证消息顺序与异常隔离。

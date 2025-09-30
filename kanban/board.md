@@ -19,6 +19,9 @@
 - _None_
 
 ## Done
+- [x] [B-3 Documentation — Architecture Deep Dive](issues/B-3-documentation-architecture.md) — Owner: AI Agent — Complexity: M
+- [x] [B-2 Documentation — Getting Started Guide](issues/B-2-documentation-getting-started.md) — Owner: AI Agent — Complexity: M
+- [x] [B-1 Documentation — Project Overview](issues/B-1-documentation-overview.md) — Owner: AI Agent — Complexity: S
 - [x] [A-10 Packaging & Deployment Assets](issues/A-10-packaging.md) — Owner: AI Agent — Complexity: M
 - [x] [A-9 Redis Registry Plugin](issues/A-9-redis-registry.md) — Owner: AI Agent — Complexity: M
 - [x] [A-8 DebugConsole & Observability Hooks](issues/A-8-debug-console.md) — Owner: AI Agent — Complexity: M
