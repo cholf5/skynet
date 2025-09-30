@@ -20,7 +20,7 @@ public static class Program
 	{
 		if (args.Length >= 2 && string.Equals(args[0], "--cluster", StringComparison.OrdinalIgnoreCase))
 		{
-			await RunClusterSampleAsync(args[1]).ConfigureAwait(false);
+			await RunClusterSampleAsync(args[1]).CAF();
 			return;
 		}
 
@@ -30,13 +30,13 @@ public static class Program
 			{
 				case "--gate":
 				case "--rooms":
-				await RunRoomSampleAsync().ConfigureAwait(false);
+				await RunRoomSampleAsync().CAF();
 				return;
 				case "--debug-console":
-				await RunDebugConsoleSampleAsync().ConfigureAwait(false);
+				await RunDebugConsoleSampleAsync().CAF();
 				return;
 				case "--rooms-bench":
-				await RunRoomBenchmarkAsync().ConfigureAwait(false);
+				await RunRoomBenchmarkAsync().CAF();
 				return;
 				case "--cluster" when args.Length >= 2:
 				break;
@@ -45,21 +45,21 @@ public static class Program
 			}
 		}
 
-		await RunLocalSampleAsync().ConfigureAwait(false);
+		await RunLocalSampleAsync().CAF();
 	}
 
 	private static async Task RunLocalSampleAsync()
 	{
 		Console.WriteLine("Bootstrapping Skynet runtime with generated login proxy...");
 		await using var system = new ActorSystem();
-		await system.CreateActorAsync(() => new LoginActor(), "login").ConfigureAwait(false);
+		await system.CreateActorAsync(() => new LoginActor(), "login").CAF();
 		var login = system.GetService<ILoginActor>("login");
-		var welcome = await login.LoginAsync(new LoginRequest("demo", "password")).ConfigureAwait(false);
+		var welcome = await login.LoginAsync(new LoginRequest("demo", "password")).CAF();
 		Console.WriteLine($"Login => {welcome.WelcomeMessage}");
-		await login.NotifyAsync(new LoginNotice(welcome.Username, "connected")).ConfigureAwait(false);
+		await login.NotifyAsync(new LoginNotice(welcome.Username, "connected")).CAF();
 		Console.WriteLine($"Ping => {login.Ping(welcome.Username)}");
 
-		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").ConfigureAwait(false);
+		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").CAF();
 		Console.WriteLine("Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an empty line to exit.");
 
 		while (true)
@@ -71,8 +71,8 @@ public static class Program
 				break;
 			}
 
-			await echo.SendAsync(new EchoNotice(line)).ConfigureAwait(false);
-			var response = await echo.CallAsync<string>(new EchoRequest(line)).ConfigureAwait(false);
+			await echo.SendAsync(new EchoNotice(line)).CAF();
+			var response = await echo.CallAsync<string>(new EchoRequest(line)).CAF();
 			Console.WriteLine($"[reply] {response}");
 		}
 
@@ -120,7 +120,7 @@ public static class Program
 			await system.CreateActorAsync(() => new EchoActor(), "echo", new ActorCreationOptions
 			{
 				HandleOverride = new ActorHandle(1001)
-			}).ConfigureAwait(false);
+			}).CAF();
 			Console.WriteLine("Node1 listening on 127.0.0.1:9101. Press ENTER to exit.");
 			Console.ReadLine();
 			return;
@@ -137,7 +137,7 @@ public static class Program
 				break;
 			}
 
-			var reply = await remote.CallAsync<string>(new EchoRequest(line), TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+			var reply = await remote.CallAsync<string>(new EchoRequest(line), TimeSpan.FromSeconds(5)).CAF();
 			Console.WriteLine($"[remote] {reply}");
 		}
 	}
@@ -147,7 +147,7 @@ public static class Program
 	{
 		Console.WriteLine("Starting actor system with debug console on 127.0.0.1:4015...");
 		await using var system = new ActorSystem();
-		await system.CreateActorAsync(() => new EchoActor(), "echo").ConfigureAwait(false);
+		await system.CreateActorAsync(() => new EchoActor(), "echo").CAF();
 		var gateway = new ActorSystemDebugConsoleGateway(system);
 		var options = new DebugConsoleOptions
 		{
@@ -156,13 +156,13 @@ public static class Program
 		};
 
 		await using var console = new DebugConsoleServer(gateway, options);
-		await console.StartAsync().ConfigureAwait(false);
+		await console.StartAsync().CAF();
 
 		Console.WriteLine("Connect with `telnet 127.0.0.1 4015` and type 'help' to inspect actors.");
 		Console.WriteLine("Press ENTER to stop the console.");
 		Console.ReadLine();
 
-		await console.StopAsync().ConfigureAwait(false);
+		await console.StopAsync().CAF();
 	}
 
 	private static async Task RunRoomSampleAsync()
@@ -178,7 +178,7 @@ public static class Program
 		};
 
 		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
-		await gate.StartAsync().ConfigureAwait(false);
+		await gate.StartAsync().CAF();
 
 		Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
 		Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
@@ -187,7 +187,7 @@ public static class Program
 		Console.ReadLine();
 
 		Console.WriteLine("Stopping gate server...");
-		await gate.StopAsync().ConfigureAwait(false);
+		await gate.StopAsync().CAF();
 	}
 
 	private static async Task RunRoomBenchmarkAsync()
@@ -204,7 +204,7 @@ public static class Program
 		{
 			var loopback = new RoomLoopbackActor();
 			actors.Add(loopback);
-			var actor = await system.CreateActorAsync(() => loopback).ConfigureAwait(false);
+			var actor = await system.CreateActorAsync(() => loopback).CAF();
 			var metadata = new SessionMetadata($"bench-{i}", "loop", null, DateTimeOffset.UtcNow);
 			manager.Join("load-test", new RoomParticipant(actor.Handle, metadata));
 		}
@@ -213,7 +213,7 @@ public static class Program
 		var stopwatch = Stopwatch.StartNew();
 		for (var i = 0; i < iterations; i++)
 		{
-			await manager.BroadcastAsync("load-test", payload).ConfigureAwait(false);
+			await manager.BroadcastAsync("load-test", payload).CAF();
 		}
 		stopwatch.Stop();
 
