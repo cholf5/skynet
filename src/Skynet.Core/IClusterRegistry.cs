@@ -31,6 +31,11 @@ public interface IClusterRegistry
 	/// Records that the specified actor is hosted on the local node.
 	/// </summary>
 	void RegisterLocalActor(string name, ActorHandle handle);
+
+	/// <summary>
+	/// Removes the registration for the specified actor from the local node.
+	/// </summary>
+	void UnregisterLocalActor(string name, ActorHandle handle);
 }
 
 /// <summary>

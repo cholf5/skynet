@@ -117,6 +117,8 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster nod
 
 `node1` 输出 “Node1 listening on 127.0.0.1:9101” 后保持运行，`node2` 可以在命令行输入消息，通过 `CallAsync` 获取远程响应。示例使用长度前缀帧、握手与心跳保活，同时利用 `StaticClusterRegistry` 将服务名称映射到节点与已知 actor handle。
 
+若需要在运行期动态注册服务，可改用 `RedisClusterRegistry`：每个节点以 `SETNX` + TTL 的方式在 Redis 中登记自身以及命名服务，心跳自动续约，宕机节点会在 TTL 到期后被剔除。参见 [docs/redis-registry.md](docs/redis-registry.md) 了解配置选项、异常处理与测试方法。
+
 ## 外部客户端接入 GateServer
 
 `Skynet.Net` 提供 `GateServer` 组件，将外部 TCP/WebSocket 客户端映射为内部 `SessionActor`：

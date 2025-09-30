@@ -159,6 +159,25 @@ _handleToNode[handle.Value] = _localNodeId;
 }
 }
 
+/// <inheritdoc />
+public void UnregisterLocalActor(string name, ActorHandle handle)
+{
+ArgumentException.ThrowIfNullOrEmpty(name);
+if (!handle.IsValid)
+{
+return;
+}
+
+lock (_sync)
+{
+if (_serviceToHandle.TryGetValue(name, out var configured) && configured == handle.Value)
+{
+_serviceToHandle.Remove(name);
+_handleToNode.Remove(handle.Value);
+}
+}
+}
+
 private static void ValidateNode(StaticClusterNodeConfiguration node)
 {
 ArgumentNullException.ThrowIfNull(node);

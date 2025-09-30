@@ -107,9 +107,19 @@ public sealed class ActorSystem : IAsyncDisposable
 			}
 		}
 
+		var registeredWithRegistry = false;
 		if (actorName is not null && _clusterRegistry is not null)
 		{
-			_clusterRegistry.RegisterLocalActor(actorName, handle);
+			try
+			{
+				_clusterRegistry.RegisterLocalActor(actorName, handle);
+				registeredWithRegistry = true;
+			}
+			catch
+			{
+				await RemoveActorAsync(handle, notifyRegistry: false).ConfigureAwait(false);
+				throw;
+			}
 		}
 
 		try
@@ -118,7 +128,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		}
 		catch
 		{
-			await RemoveActorAsync(handle).ConfigureAwait(false);
+			await RemoveActorAsync(handle, registeredWithRegistry).ConfigureAwait(false);
 			throw;
 		}
 
@@ -273,24 +283,7 @@ public sealed class ActorSystem : IAsyncDisposable
 			return false;
 		}
 
-		ActorHost? host;
-		string? name;
-		lock (_registryLock)
-		{
-			if (!_actors.TryRemove(handle.Value, out host))
-			{
-				return false;
-			}
-
-			if (_handleToName.TryRemove(handle.Value, out name))
-			{
-				_nameToHandle.TryRemove(name, out _);
-			}
-		}
-
-		_metrics.UnregisterActor(handle);
-		await host.DisposeAsync().ConfigureAwait(false);
-		return true;
+		return await RemoveActorAsync(handle).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -349,18 +342,26 @@ public sealed class ActorSystem : IAsyncDisposable
 		Version: 1);
 	}
 
-	private async ValueTask RemoveActorAsync(ActorHandle handle)
+	private async ValueTask<bool> RemoveActorAsync(ActorHandle handle, bool notifyRegistry = true)
 	{
-		if (_actors.TryRemove(handle.Value, out var host))
+		if (!_actors.TryRemove(handle.Value, out var host))
 		{
-			if (_handleToName.TryRemove(handle.Value, out var name))
-			{
-				_nameToHandle.TryRemove(name, out _);
-			}
-
-			_metrics.UnregisterActor(handle);
-			await host.DisposeAsync().ConfigureAwait(false);
+			return false;
 		}
+
+		string? name = null;
+		if (_handleToName.TryRemove(handle.Value, out name))
+		{
+			_nameToHandle.TryRemove(name, out _);
+			if (notifyRegistry && _clusterRegistry is not null)
+			{
+				_clusterRegistry.UnregisterLocalActor(name, handle);
+			}
+		}
+
+		_metrics.UnregisterActor(handle);
+		await host.DisposeAsync().ConfigureAwait(false);
+		return true;
 	}
 
 	private void ThrowIfDisposed()
@@ -391,9 +392,18 @@ public sealed class ActorSystem : IAsyncDisposable
 				await asyncDisposable.DisposeAsync().ConfigureAwait(false);
 				break;
 				case IDisposable disposable:
-				disposable.Dispose();
+					disposable.Dispose();
 				break;
 			}
+		}
+
+		if (_clusterRegistry is IAsyncDisposable asyncRegistry)
+		{
+			await asyncRegistry.DisposeAsync().ConfigureAwait(false);
+		}
+		else if (_clusterRegistry is IDisposable registryDisposable)
+		{
+			registryDisposable.Dispose();
 		}
 	}
 }
