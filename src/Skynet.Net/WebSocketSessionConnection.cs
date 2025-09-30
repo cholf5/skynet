@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Threading;
 
 namespace Skynet.Net;
 
@@ -6,22 +7,22 @@ internal sealed class WebSocketSessionConnection : ISessionConnection
 {
 	private readonly WebSocket _socket;
 	private readonly SemaphoreSlim _sendLock = new(1, 1);
-	private volatile DateTimeOffset _lastActivity;
+	private long _lastActivityTicks;
 	private bool _disposed;
 
 	public WebSocketSessionConnection(WebSocket socket)
 	{
 		_socket = socket;
-		_lastActivity = DateTimeOffset.UtcNow;
+		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	}
 
 	public System.Net.EndPoint? RemoteEndPoint => null;
 
-	public DateTimeOffset LastActivity => _lastActivity;
+	public DateTimeOffset LastActivity => new DateTimeOffset(Interlocked.Read(ref _lastActivityTicks), TimeSpan.Zero);
 
 	public void MarkActivity()
 	{
-		_lastActivity = DateTimeOffset.UtcNow;
+		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	}
 
 	public async ValueTask SendAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)

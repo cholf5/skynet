@@ -118,8 +118,8 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 	private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
 	{
 		using (client)
-		using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 		{
+			using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 			linkedCts.CancelAfter(_options.IdleTimeout);
 			NetworkStream stream;
 			try

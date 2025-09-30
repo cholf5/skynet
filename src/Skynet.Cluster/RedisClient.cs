@@ -89,14 +89,14 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 	{
 		ArgumentException.ThrowIfNullOrEmpty(channel);
 		ArgumentNullException.ThrowIfNull(message);
-		_subscriber.Publish(channel, message, CommandFlags.FireAndForget);
+		_subscriber.Publish(RedisChannel.Literal(channel), message, CommandFlags.FireAndForget);
 	}
 
 	public IDisposable Subscribe(string channel, Action<string> handler)
 	{
 		ArgumentException.ThrowIfNullOrEmpty(channel);
 		ArgumentNullException.ThrowIfNull(handler);
-		var redisChannel = new RedisChannel(channel, RedisChannel.PatternMode.Auto);
+		var redisChannel = RedisChannel.Literal(channel);
 		Action<RedisChannel, RedisValue> wrapped = (_, value) => handler(value!);
 		_subscriber.SubscribeAsync(redisChannel, wrapped).GetAwaiter().GetResult();
 		return new RedisSubscription(_subscriber, redisChannel, wrapped);

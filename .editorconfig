@@ -15,3 +15,11 @@ csharp_prefer_braces = true:suggestion
 csharp_style_namespace_declarations = block_scoped:suggestion
 csharp_style_prefer_top_level_statements = false:suggestion
 csharp_preserve_single_line_blocks = false
+dotnet_diagnostic.RS1036.severity = none
+dotnet_diagnostic.RS2008.severity = none
+
+[*.md]
+dotnet_diagnostic.RS2007.severity = none
+
+[tests/**/*.cs]
+dotnet_diagnostic.xUnit1030.severity = none
