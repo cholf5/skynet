@@ -168,6 +168,44 @@ nick <alias>        # 修改别名
 dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --rooms-bench
 ```
 
+## 发布与部署
+
+更多细节可参考 [docs/release-guide.md](docs/release-guide.md)。
+
+### NuGet 包装
+
+- 所有打包元数据在 [`Directory.Build.props`](Directory.Build.props) 与 [`Directory.Build.targets`](Directory.Build.targets) 中集中维护，默认生成符号包与 Source Link 信息，输出路径为 `artifacts/nuget/`。
+- 仓库根目录提供默认的 [`nuget.config`](nuget.config)，将本地构建的包源映射为 `skynet-local`。执行 `dotnet restore --configfile nuget.config` 即可在本地优先解析这些包。
+- 手动打包示例：
+
+  ```bash
+  dotnet pack Skynet.sln --configuration Release
+  ```
+
+- 发布到官方 NuGet 的自动化脚本位于 [`scripts/publish-packages.sh`](scripts/publish-packages.sh)。在设置好 `NUGET_API_KEY` 环境变量后执行脚本即可完成打包与推送，重复版本会自动跳过。
+- [`scripts/verify-packages.sh`](scripts/verify-packages.sh) 会重新打包并生成一个临时控制台应用，通过本地包源拉取 `Skynet.Core` 验证引用与运行流程。
+
+### CI 发布流程
+
+GitHub Actions 中新增 [`release.yml`](.github/workflows/release.yml) 工作流，支持：
+
+- 手动触发（`workflow_dispatch`）或推送 `v*` 标签时运行；
+- 还原依赖、执行 `dotnet pack` 生成包工件；
+- 可选地将工件上传到 NuGet（需在仓库机密中配置 `NUGET_API_KEY`）。
+
+工作流会复用与 CI 相同的 .NET SDK 版本，确保手动发布与自动发布一致。详情参见 [`docs/nuget/package-readme.md`](docs/nuget/package-readme.md)。
+
+### Docker 示例
+
+仓库根目录提供了多阶段构建的 [`Dockerfile`](Dockerfile)，用于发布示例程序：
+
+```bash
+docker build -t skynet/examples .
+docker run --rm -p 8080:8080 skynet/examples
+```
+
+镜像会在启动时运行 `Skynet.Examples` 的 `--gate` 模式，监听 8080 端口并加载示例房间路由逻辑。可根据需要通过传入自定义参数或挂载配置覆盖默认行为。
+
 ## 贡献指南
 
 1. 阅读 [docs/PRD.md](docs/PRD.md) 了解产品需求与交付范围。

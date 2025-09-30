@@ -1,7 +1,7 @@
 # Kanban Board
 
 ## Backlog
-- [ ] [A-10 Packaging & Deployment Assets](issues/A-10-packaging.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## To Do
 - _None_
@@ -19,6 +19,7 @@
 - _None_
 
 ## Done
+- [x] [A-10 Packaging & Deployment Assets](issues/A-10-packaging.md) — Owner: AI Agent — Complexity: M
 - [x] [A-9 Redis Registry Plugin](issues/A-9-redis-registry.md) — Owner: AI Agent — Complexity: M
 - [x] [A-8 DebugConsole & Observability Hooks](issues/A-8-debug-console.md) — Owner: AI Agent — Complexity: M
 - [x] [A-7 RoomManager & Multicast Sample](issues/A-7-roommanager.md) — Owner: AI Agent — Complexity: M
