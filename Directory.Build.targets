@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <_NormalizedVersionSuffix Condition="'$(VersionSuffix)' != ''">-$(VersionSuffix)</_NormalizedVersionSuffix>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">$(VersionPrefix)$(_NormalizedVersionSuffix)</PackageVersion>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(VersionPrefix).0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">$(VersionPrefix).0</FileVersion>
+    <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(PackageVersion)</InformationalVersion>
+  </PropertyGroup>
+
+  <Target Name="_SkynetEnsurePackageMetadata" BeforeTargets="GenerateNuspec" Condition="'$(IsPackable)' == 'true'">
+    <Error Condition="'$(PackageReadmeFile)' == ''" Text="PackageReadmeFile must be specified for $(MSBuildProjectName)." />
+  </Target>
+
+  <Target Name="_SkynetAttachPackageReadme" BeforeTargets="Pack" Condition="'$(IsPackable)' == 'true'">
+    <ItemGroup>
+      <None Include="$(MSBuildThisFileDirectory)docs/nuget/package-readme.md" Pack="true" PackagePath="" Link="package-readme.md" Visible="false" />
+    </ItemGroup>
+  </Target>
+</Project>

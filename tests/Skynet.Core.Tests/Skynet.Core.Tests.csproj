@@ -2,17 +2,19 @@
 	<PropertyGroup>
 		<IsPackable>false</IsPackable>
 	</PropertyGroup>
-	<ItemGroup>
-		<PackageReference Include="Microsoft.NET.Test.Sdk" />
-		<PackageReference Include="xunit" />
-		<PackageReference Include="xunit.runner.visualstudio" />
-		<PackageReference Include="coverlet.collector" />
-		<PackageReference Include="FluentAssertions" />
-	</ItemGroup>
+<ItemGroup>
+<PackageReference Include="Microsoft.NET.Test.Sdk" />
+<PackageReference Include="xunit" />
+<PackageReference Include="xunit.runner.visualstudio" />
+<PackageReference Include="coverlet.collector" />
+<PackageReference Include="FluentAssertions" />
+<PackageReference Include="MessagePack.Annotations" />
+</ItemGroup>
 	<ItemGroup>
 		<Using Include="Xunit" />
 	</ItemGroup>
-	<ItemGroup>
-		<ProjectReference Include="..\..\src\Skynet.Core\Skynet.Core.csproj" />
-	</ItemGroup>
+<ItemGroup>
+<ProjectReference Include="..\..\src\Skynet.Core\Skynet.Core.csproj" />
+<ProjectReference Include="..\..\src\Skynet.Cluster\Skynet.Cluster.csproj" />
+</ItemGroup>
 </Project>

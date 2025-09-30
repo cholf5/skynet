@@ -36,18 +36,186 @@ Skynet.sln
 git clone https://github.com/<your-org>/Skynet.git
 cd Skynet
 
-# 还原依赖
-dotnet restore
-
-# 构建所有项目
+# 还原依赖并构建
 dotnet build
 
-# 执行测试
-dotnet test
+# 执行核心测试套件
+dotnet test tests/Skynet.Core.Tests/Skynet.Core.Tests.csproj
 
-# 运行示例（占位输出）
+# 运行示例（含登录代理与 Echo）
 dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj
 ```
+
+示例程序会首先演示通过 SourceGenerator 生成的 `ILoginActor` 代理，然后启动本地 `ActorSystem` 注册名为 `echo` 的服务：
+
+```text
+Bootstrapping Skynet runtime with generated login proxy...
+Login => Welcome demo!
+Ping => PONG: demo
+Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an empty line to exit.
+```
+
+按回车退出后，ActorSystem 会自动释放。
+
+## 文档索引
+
+- [项目概览](docs/overview.md)
+- [快速上手指南](docs/getting-started.md)
+- [架构设计解读](docs/architecture.md)
+- [项目需求文档（PRD）](docs/PRD.md)
+- [发布流程指南](docs/release-guide.md)
+- [Redis 注册中心说明](docs/redis-registry.md)
+- [调试控制台说明](docs/debug-console.md)
+- [房间系统指南](docs/rooms.md)
+
+## 核心能力
+
+- InProc Actor 运行时：基于 `System.Threading.Channels` 的邮箱，保证消息顺序与异常隔离。
+- `ActorSystem` 注册与查找：支持 handle/name 双索引、唯一服务与生命周期管理。
+- 消息语义：提供 `SendAsync`（fire-and-forget）与 `CallAsync`（请求-响应）API。
+- InProc Transport：本地消息短路，无需序列化，可通过 `InProcTransportOptions` 切换为排队模式以模拟远程语义。
+- TcpTransport + 静态注册表：长度前缀帧、握手、心跳与错误处理，支持基于静态配置的跨进程 send/call。
+- GateServer：统一 TCP/WebSocket 接入，SessionActor 生命周期管理、心跳超时和断线重连策略，附带端到端集成测试。
+- DebugConsole 调试控制台：提供 Telnet/Netcat 接入、list/info/trace/kill 命令以及实时指标快照。
+- 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
+
+## 声明接口并生成代理
+
+在业务侧声明接口并标记 `[SkynetActor]` 属性，SourceGenerator 会在编译时生成代理、调度器与 MessagePack 序列化定义：
+
+```csharp
+[SkynetActor("login", Unique = true)]
+public interface ILoginActor
+{
+Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
+ValueTask NotifyAsync(LoginNotice notice);
+string Ping(string name);
+}
+
+public sealed class LoginActor : RpcActor<ILoginActor>, ILoginActor
+{
+public Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
+{
+return Task.FromResult(new LoginResponse(request.Username, $"Welcome {request.Username}!"));
+}
+
+public ValueTask NotifyAsync(LoginNotice notice)
+{
+// ...
+return ValueTask.CompletedTask;
+}
+
+public string Ping(string name) => $"PONG: {name}";
+}
+
+[MessagePackObject]
+public sealed record LoginRequest([property: Key(0)] string Username, [property: Key(1)] string Password);
+```
+
+运行时可以通过 `ActorSystem.GetService<ILoginActor>("login")` 获取强类型代理，调用时自动封送并保证 `Send` / `Call` 语义，同时默认使用 MessagePack 进行序列化。
+
+## 跨进程示例
+
+仓库提供一个最小的两节点 TCP 示例，演示如何通过静态注册表和 `TcpTransport` 建立跨进程调用：
+
+```bash
+# 终端 1：node1 监听 127.0.0.1:9101 并托管 echo actor
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster node1
+
+# 终端 2：node2 通过 TcpTransport 调用远程 echo actor
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster node2
+```
+
+`node1` 输出 “Node1 listening on 127.0.0.1:9101” 后保持运行，`node2` 可以在命令行输入消息，通过 `CallAsync` 获取远程响应。示例使用长度前缀帧、握手与心跳保活，同时利用 `StaticClusterRegistry` 将服务名称映射到节点与已知 actor handle。
+
+若需要在运行期动态注册服务，可改用 `RedisClusterRegistry`：每个节点以 `SETNX` + TTL 的方式在 Redis 中登记自身以及命名服务，心跳自动续约，宕机节点会在 TTL 到期后被剔除。参见 [docs/redis-registry.md](docs/redis-registry.md) 了解配置选项、异常处理与测试方法。
+
+## 外部客户端接入 GateServer
+
+`Skynet.Net` 提供 `GateServer` 组件，将外部 TCP/WebSocket 客户端映射为内部 `SessionActor`：
+
+```csharp
+var manager = new RoomManager(system);
+var options = new GateServerOptions
+{
+TcpPort = 2013,
+WebSocketPort = 8080,
+RouterFactory = context => new RoomSessionRouter(manager)
+};
+
+await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
+await gate.StartAsync();
+```
+
+`RoomManager` 管理房间成员与广播消息，`RoomSessionRouter` 则提供基于文本命令的协议（`join`、`leave`、`say`、`who`、`rooms`、`nick`）。自定义 `ISessionMessageRouter` 可以在会话开始时执行认证，在 `OnSessionMessageAsync` 中将客户端消息路由到游戏逻辑 actor，并通过 `SessionContext.SendAsync` 写回。框架内置：
+
+- 长度前缀 TCP 帧与 WebSocket 二进制消息解析；
+- SessionActor 内部顺序化处理，支持将 `CallAsync` 转发到任意 actor；
+- 断线与心跳事件通过 `OnSessionClosedAsync` 反馈，可在关闭时清理玩家状态；
+- 集成测试覆盖 TCP/WebSocket 往返、重连与超时场景（见 `tests/Skynet.Net.Tests/GateServerTests.cs`）。
+
+停止 GateServer 时会向所有 SessionActor 发送 `SessionCloseMessage`，确保连接与会话资源被释放。
+
+在示例程序中可以通过 `--gate`/`--rooms` 选项启动房间广播示例，方便与外部 TCP/WebSocket 客户端联调：
+
+```bash
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --gate
+```
+
+默认会将所有客户端加入 `lobby`，常用命令如下：
+
+```
+join <room>         # 加入房间
+leave <room>        # 离开房间
+say <room> <text>   # 广播消息
+rooms               # 查看当前已加入的房间
+who <room>          # 查询房间成员
+nick <alias>        # 修改别名
+```
+
+性能基准可以通过 `--rooms-bench` 触发，模拟 200 个会话进行 1000 轮广播并输出吞吐量：
+
+```bash
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --rooms-bench
+```
+
+## 发布与部署
+
+更多细节可参考 [docs/release-guide.md](docs/release-guide.md)。
+
+### NuGet 包装
+
+- 所有打包元数据在 [`Directory.Build.props`](Directory.Build.props) 与 [`Directory.Build.targets`](Directory.Build.targets) 中集中维护，默认生成符号包与 Source Link 信息，输出路径为 `artifacts/nuget/`。
+- 仓库根目录提供默认的 [`nuget.config`](nuget.config)，将本地构建的包源映射为 `skynet-local`。执行 `dotnet restore --configfile nuget.config` 即可在本地优先解析这些包。
+- 手动打包示例：
+
+  ```bash
+  dotnet pack Skynet.sln --configuration Release
+  ```
+
+- 发布到官方 NuGet 的自动化脚本位于 [`scripts/publish-packages.sh`](scripts/publish-packages.sh)。在设置好 `NUGET_API_KEY` 环境变量后执行脚本即可完成打包与推送，重复版本会自动跳过。
+- [`scripts/verify-packages.sh`](scripts/verify-packages.sh) 会重新打包并生成一个临时控制台应用，通过本地包源拉取 `Skynet.Core` 验证引用与运行流程。
+
+### CI 发布流程
+
+GitHub Actions 中新增 [`release.yml`](.github/workflows/release.yml) 工作流，支持：
+
+- 手动触发（`workflow_dispatch`）或推送 `v*` 标签时运行；
+- 还原依赖、执行 `dotnet pack` 生成包工件；
+- 可选地将工件上传到 NuGet（需在仓库机密中配置 `NUGET_API_KEY`）。
+
+工作流会复用与 CI 相同的 .NET SDK 版本，确保手动发布与自动发布一致。详情参见 [`docs/nuget/package-readme.md`](docs/nuget/package-readme.md)。
+
+### Docker 示例
+
+仓库根目录提供了多阶段构建的 [`Dockerfile`](Dockerfile)，用于发布示例程序：
+
+```bash
+docker build -t skynet/examples .
+docker run --rm -p 8080:8080 skynet/examples
+```
+
+镜像会在启动时运行 `Skynet.Examples` 的 `--gate` 模式，监听 8080 端口并加载示例房间路由逻辑。可根据需要通过传入自定义参数或挂载配置覆盖默认行为。
 
 ## 贡献指南
 
@@ -57,3 +225,33 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj
 4. 遵循 [CONTRIBUTING.md](CONTRIBUTING.md) 与仓库编码规范（见 [AGENTS.md](AGENTS.md)）。
 
 欢迎通过 Issue、Discussion 或 PR 参与建设！
+
+## 调试控制台与指标
+
+`Skynet.Extras` 引入了基于 TCP 的 DebugConsole，可用于快速查看 Actor 列表、队列长度、累计处理次数以及异常统计，同时支持即时开启或关闭特定 Actor 的 trace 日志。
+
+```bash
+# 启动示例并开放调试控制台 (默认 127.0.0.1:4015)
+dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --debug-console
+```
+
+启动后可以使用 `telnet` 或 `nc` 连接：
+
+```bash
+telnet 127.0.0.1 4015
+# 或
+nc 127.0.0.1 4015
+```
+
+常用命令：
+
+```
+help                     # 查看命令说明
+list                     # 展示所有 Actor 的队列长度、处理次数与 trace 状态
+info <id|name>           # 查看单个 Actor 的详细指标快照
+trace <id|name> [on|off] # 切换或设置 trace 记录
+kill <id|name>           # 请求停止指定 Actor
+exit                     # 关闭当前连接
+```
+
+DebugConsole 基于 `ActorMetricsCollector` 采集数据，所有指标均以本地快照方式返回，不依赖外部监控系统。

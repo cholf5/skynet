@@ -1,11 +1,48 @@
 <Project>
-<PropertyGroup>
-<TargetFramework>net9.0</TargetFramework>
-<Nullable>enable</Nullable>
-<ImplicitUsings>enable</ImplicitUsings>
-<LangVersion>preview</LangVersion>
-<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-<AnalysisLevel>preview</AnalysisLevel>
-		<ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-</PropertyGroup>
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>preview</AnalysisLevel>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <Authors>Skynet Contributors</Authors>
+    <Company>Skynet Project</Company>
+    <Product>Skynet Actor Framework</Product>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/openai/skynet</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/openai/skynet</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageTags>actor;skynet;game-server;dotnet</PackageTags>
+    <PackageReadmeFile>package-readme.md</PackageReadmeFile>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)artifacts/nuget</PackageOutputPath>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <GenerateDocumentationFile Condition="'$(IsPackable)' == 'true'">true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageId Condition="'$(PackageId)' == ''">$(MSBuildProjectName)</PackageId>
+    <Title Condition="'$(Title)' == ''">$(MSBuildProjectName)</Title>
+    <Description Condition="'$(Description)' == ''">Skynet actor framework component $(MSBuildProjectName).</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsPackable)' != 'true'">
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Skynet.Generators'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Skynet.Generators/Skynet.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
 </Project>

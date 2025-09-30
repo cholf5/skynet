@@ -1,0 +1,59 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      versionSuffix:
+        description: 'Optional VersionSuffix override (e.g. rc1)'
+        required: false
+        default: ''
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      DOTNET_NOLOGO: true
+      NUGET_XMLDOC_MODE: skip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.100-rc.1.24452.12
+
+      - name: Restore
+        run: dotnet restore Skynet.sln
+
+      - name: Pack
+        run: |
+          VERSION_SUFFIX="${{ github.event.inputs.versionSuffix }}"
+          if [ -n "$VERSION_SUFFIX" ]; then
+            dotnet pack Skynet.sln --configuration Release --output artifacts/nuget --include-symbols --include-source -p:VersionSuffix=$VERSION_SUFFIX
+          else
+            dotnet pack Skynet.sln --configuration Release --output artifacts/nuget --include-symbols --include-source
+          fi
+
+      - name: Upload NuGet packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/nuget/*.nupkg
+            artifacts/nuget/*.snupkg
+          if-no-files-found: error
+
+      - name: Publish to NuGet.org
+        if: secrets.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          for package in artifacts/nuget/*.nupkg; do
+            [ -f "$package" ] || continue
+            dotnet nuget push "$package" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
