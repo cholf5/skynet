@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
+using System.Threading;
 
 namespace Skynet.Net;
 
@@ -8,23 +9,23 @@ internal sealed class TcpSessionConnection : ISessionConnection
 	private readonly TcpClient _client;
 	private readonly NetworkStream _stream;
 	private readonly SemaphoreSlim _sendLock = new(1, 1);
-	private volatile DateTimeOffset _lastActivity;
+	private long _lastActivityTicks;
 	private bool _disposed;
 
 	public TcpSessionConnection(TcpClient client)
 	{
 		_client = client;
 		_stream = client.GetStream();
-		_lastActivity = DateTimeOffset.UtcNow;
+		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	}
 
 	public System.Net.EndPoint? RemoteEndPoint => _client.Client.RemoteEndPoint;
 
-	public DateTimeOffset LastActivity => _lastActivity;
+	public DateTimeOffset LastActivity => new DateTimeOffset(Interlocked.Read(ref _lastActivityTicks), TimeSpan.Zero);
 
 	public void MarkActivity()
 	{
-		_lastActivity = DateTimeOffset.UtcNow;
+		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	}
 
 	public async ValueTask SendAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
@@ -33,7 +34,7 @@ internal sealed class TcpSessionConnection : ISessionConnection
 		await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
 		try
 		{
-			Span<byte> header = stackalloc byte[4];
+			var header = new byte[4];
 			BinaryPrimitives.WriteInt32BigEndian(header, payload.Length);
 			await _stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
 			if (!payload.IsEmpty)

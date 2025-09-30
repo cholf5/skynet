@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -315,7 +316,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		await host.EnqueueAsync(new MailboxMessage(envelope, response), cancellationToken).ConfigureAwait(false);
 	}
 
-	internal bool TryGetActorHost(ActorHandle handle, out ActorHost host)
+	internal bool TryGetActorHost(ActorHandle handle, [MaybeNullWhen(false)] out ActorHost host)
 	{
 		return _actors.TryGetValue(handle.Value, out host);
 	}
@@ -338,7 +339,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		payload,
 		traceId,
 		DateTimeOffset.UtcNow,
-		timeToLive: null,
+		TimeToLive: null,
 		Version: 1);
 	}
 
@@ -381,7 +382,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		var snapshot = _actors.Keys.ToArray();
 		foreach (var handleValue in snapshot)
 		{
-			await KillAsync(new ActorHandle(handleValue)).ConfigureAwait(false);
+			await RemoveActorAsync(new ActorHandle(handleValue)).ConfigureAwait(false);
 		}
 
 		if (_ownsTransport)

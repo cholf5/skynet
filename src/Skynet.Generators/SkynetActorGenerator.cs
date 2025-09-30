@@ -63,38 +63,43 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 	public void Initialize(IncrementalGeneratorInitializationContext context)
 	{
 		var contracts = context.SyntaxProvider.ForAttributeWithMetadataName(
-			AttributeMetadataName,
-			static (node, _) => node is InterfaceDeclarationSyntax,
-			static (syntaxContext, cancellationToken) => CreateModel(syntaxContext, cancellationToken))
-			.Where(static model => model is not null)
-			.Select(static (model, _) => model!);
+				AttributeMetadataName,
+				static (node, _) => node is InterfaceDeclarationSyntax,
+				static (syntaxContext, cancellationToken) => CreateModel(syntaxContext, cancellationToken));
 
-		context.RegisterSourceOutput(contracts, static (sourceContext, model) =>
+		context.RegisterSourceOutput(contracts, static (sourceContext, result) =>
 		{
+			foreach (var diagnostic in result.Diagnostics)
+			{
+				sourceContext.ReportDiagnostic(diagnostic);
+			}
+
+			if (result.Model is not { } model)
+			{
+				return;
+			}
+
 			var writer = new SourceWriter();
 			WriteContract(writer, model);
 			sourceContext.AddSource($"{model.HintName}.g.cs", writer.ToString());
 		});
 	}
 
-	private static ActorContractModel? CreateModel(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
+	private static ContractGenerationResult CreateModel(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
 	{
 		if (context.TargetSymbol is not INamedTypeSymbol interfaceSymbol)
 		{
-			context.ReportDiagnostic(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), context.TargetSymbol?.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ?? "unknown"));
-			return null;
+			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), context.TargetSymbol?.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ?? "unknown"));
 		}
 
 		if (interfaceSymbol.TypeKind != TypeKind.Interface)
 		{
-			context.ReportDiagnostic(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-			return null;
+			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 		}
 
 		if (interfaceSymbol.IsGenericType)
 		{
-			context.ReportDiagnostic(Diagnostic.Create(GenericInterfaceDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-			return null;
+			return ContractGenerationResult.Failure(Diagnostic.Create(GenericInterfaceDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 		}
 
 		var attributeData = context.Attributes[0];
@@ -125,8 +130,8 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		var valueTaskOfTType = compilation.GetTypeByMetadataName("System.Threading.Tasks.ValueTask`1");
 
 		var methods = CollectMethods(interfaceSymbol);
-		var methodModels = ImmutableArray.CreateBuilder<ActorMethodModel>(methods.Count);
-		for (var i = 0; i < methods.Count; i++)
+		var methodModels = ImmutableArray.CreateBuilder<ActorMethodModel>(methods.Length);
+		for (var i = 0; i < methods.Length; i++)
 		{
 			var method = methods[i];
 			if (method.IsStatic || method.MethodKind != MethodKind.Ordinary)
@@ -136,8 +141,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 
 			if (method.TypeParameters.Length > 0)
 			{
-				context.ReportDiagnostic(Diagnostic.Create(GenericMethodDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
-				return null;
+				return ContractGenerationResult.Failure(Diagnostic.Create(GenericMethodDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
 			}
 
 			var parameters = ImmutableArray.CreateBuilder<ActorParameterModel>(method.Parameters.Length);
@@ -146,8 +150,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 			{
 				if (parameter.RefKind != RefKind.None)
 				{
-					context.ReportDiagnostic(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-					return null;
+					return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 				}
 
 				var parameterTypeDisplay = parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
@@ -157,14 +160,12 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 				{
 					if (cancellationParameter is not null)
 					{
-						context.ReportDiagnostic(Diagnostic.Create(MultipleCancellationTokensDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
-						return null;
+						return ContractGenerationResult.Failure(Diagnostic.Create(MultipleCancellationTokensDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
 					}
 
 					if (parameter.Ordinal != method.Parameters.Length - 1)
 					{
-						context.ReportDiagnostic(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-						return null;
+						return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 					}
 
 					cancellationParameter = new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name, defaultClause, true, parameter.IsParams);
@@ -174,18 +175,17 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 				parameters.Add(new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name, defaultClause, false, parameter.IsParams));
 			}
 
-			var returnModel = DetermineReturnModel(context, interfaceSymbol, method, taskType, taskOfTType, valueTaskType, valueTaskOfTType);
-			if (returnModel is null)
+			if (!TryDetermineReturnModel(context, interfaceSymbol, method, taskType, taskOfTType, valueTaskType, valueTaskOfTType, out var returnModel, out var returnDiagnostic))
 			{
-				return null;
+				return ContractGenerationResult.Failure(returnDiagnostic!);
 			}
 
-			methodModels.Add(new ActorMethodModel(method, parameters.ToImmutable(), cancellationParameter, returnModel.Value, i));
+			methodModels.Add(new ActorMethodModel(method, parameters.ToImmutable(), cancellationParameter, returnModel, i));
 		}
 
 		var @namespace = interfaceSymbol.ContainingNamespace is { IsGlobalNamespace: false } ns ? ns.ToDisplayString() : null;
 		var hintName = interfaceSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat).Replace('<', '_').Replace('>', '_');
-		return new ActorContractModel(interfaceSymbol, @namespace, serviceName, unique, methodModels.ToImmutable(), hintName);
+		return ContractGenerationResult.Success(new ActorContractModel(interfaceSymbol, @namespace, serviceName, unique, methodModels.ToImmutable(), hintName));
 	}
 
 	private static ImmutableArray<IMethodSymbol> CollectMethods(INamedTypeSymbol interfaceSymbol)
@@ -217,51 +217,61 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		return result.ToImmutableArray();
 	}
 
-	private static ActorReturnModel? DetermineReturnModel(
+	private static bool TryDetermineReturnModel(
 		GeneratorAttributeSyntaxContext context,
 		INamedTypeSymbol interfaceSymbol,
 		IMethodSymbol method,
 		INamedTypeSymbol? taskType,
 		INamedTypeSymbol? taskOfTType,
 		INamedTypeSymbol? valueTaskType,
-		INamedTypeSymbol? valueTaskOfTType)
+		INamedTypeSymbol? valueTaskOfTType,
+		out ActorReturnModel returnModel,
+		out Diagnostic? diagnostic)
 	{
+		returnModel = default;
+		diagnostic = null;
 		var returnType = method.ReturnType;
 		var returnDisplay = returnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 		var isVoid = returnType.SpecialType == SpecialType.System_Void;
 
 		if (isVoid)
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.Void, returnType);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.Void, returnType);
+			return true;
 		}
 
 		if (taskType is not null && SymbolEqualityComparer.Default.Equals(returnType, taskType))
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.Task, returnType);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.Task, returnType);
+			return true;
 		}
 
 		if (valueTaskType is not null && SymbolEqualityComparer.Default.Equals(returnType, valueTaskType))
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTask, returnType);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTask, returnType);
+			return true;
 		}
 
 		if (taskOfTType is not null && returnType is INamedTypeSymbol taskOfT && SymbolEqualityComparer.Default.Equals(taskOfT.OriginalDefinition, taskOfTType))
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.TaskOfT, taskOfT.TypeArguments[0]);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.TaskOfT, taskOfT.TypeArguments[0]);
+			return true;
 		}
 
 		if (valueTaskOfTType is not null && returnType is INamedTypeSymbol valueTaskOfT && SymbolEqualityComparer.Default.Equals(valueTaskOfT.OriginalDefinition, valueTaskOfTType))
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTaskOfT, valueTaskOfT.TypeArguments[0]);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTaskOfT, valueTaskOfT.TypeArguments[0]);
+			return true;
 		}
 
 		if (returnType.TypeKind != TypeKind.Error)
 		{
-			return new ActorReturnModel(returnDisplay, ActorReturnKind.Sync, returnType);
+			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.Sync, returnType);
+			return true;
 		}
 
-		context.ReportDiagnostic(Diagnostic.Create(UnsupportedReturnTypeDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, returnDisplay));
-		return null;
+		diagnostic = Diagnostic.Create(UnsupportedReturnTypeDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, returnDisplay);
+		return false;
 	}
 
 	private static string? GetDefaultClause(IParameterSymbol parameter)
@@ -320,7 +330,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		writer.AppendLine($"{serviceNameLiteral},");
 		writer.AppendLine(model.IsUnique ? "true" : "false");
 		writer.Unindent();
-		writer.AppendLine(")");
+writer.AppendLine(");");
 		writer.EndBlock();
 		if (model.ServiceName is not null)
 		{
@@ -512,21 +522,21 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 
 	private sealed record ActorParameterModel(IParameterSymbol Symbol, string TypeDisplay, string Name, string? DefaultClause, bool IsCancellationToken, bool IsParams)
 	{
-		public string PropertyName => string.Create(Name.Length == 0 ? 4 : Name.Length + 1, Name, static (span, value) =>
+		public string PropertyName
 		{
-			if (string.IsNullOrEmpty(value))
+			get
 			{
-				"Arg".AsSpan().CopyTo(span);
-				span[3] = '0';
-				return;
-			}
+				if (string.IsNullOrEmpty(Name))
+				{
+					return "Arg0";
+				}
 
-			span[0] = char.ToUpper(value[0], CultureInfo.InvariantCulture);
-			for (var i = 1; i < value.Length; i++)
-			{
-				span[i] = value[i];
+				var characters = Name.ToCharArray();
+				characters[0] = char.ToUpper(characters[0], CultureInfo.InvariantCulture);
+				return new string(characters);
 			}
-		});
+		}
+
 	}
 
 	private sealed record ActorMethodModel(IMethodSymbol Symbol, ImmutableArray<ActorParameterModel> PayloadParameters, ActorParameterModel? CancellationParameter, ActorReturnModel ReturnModel, int Index)
@@ -539,8 +549,15 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 	{
 	}
 
-	private enum ActorReturnKind
+	private readonly record struct ContractGenerationResult(ActorContractModel? Model, ImmutableArray<Diagnostic> Diagnostics)
 	{
+		public static ContractGenerationResult Success(ActorContractModel model) => new(model, ImmutableArray<Diagnostic>.Empty);
+
+		public static ContractGenerationResult Failure(Diagnostic diagnostic) => new(null, ImmutableArray.Create(diagnostic));
+	}
+
+	private enum ActorReturnKind
+{
 		Void,
 		Task,
 		ValueTask,
@@ -600,14 +617,5 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 		{
 			return _builder.ToString();
 		}
-	}
-}
-
-namespace Skynet.Core.RpcMessages
-{
-	[global::MessagePack.MessagePackObject]
-	[global::System.Runtime.CompilerServices.CompilerGenerated]
-	public sealed partial class EmptyPayload
-	{
 	}
 }

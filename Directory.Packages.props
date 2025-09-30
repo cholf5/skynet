@@ -5,10 +5,12 @@
 <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
 <PackageVersion Include="coverlet.collector" Version="6.0.0" />
 <PackageVersion Include="FluentAssertions" Version="6.12.0" />
-<PackageVersion Include="MessagePack" Version="2.6.118" />
-<PackageVersion Include="MessagePack.Annotations" Version="2.6.118" />
-<PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
-<PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
-<PackageVersion Include="StackExchange.Redis" Version="2.7.33" />
+    <PackageVersion Include="MessagePack" Version="3.1.4" />
+    <PackageVersion Include="MessagePack.Annotations" Version="3.1.4" />
+    <PackageVersion Include="MessagePackAnalyzer" Version="3.1.4" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
+    <PackageVersion Include="StackExchange.Redis" Version="2.7.33" />
+    <PackageVersion Include="System.Collections.Immutable" Version="8.0.0" />
 </ItemGroup>
 </Project>

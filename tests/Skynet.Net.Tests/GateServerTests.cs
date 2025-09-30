@@ -15,7 +15,7 @@ public sealed class GateServerTests
 	[Fact]
 	public async Task TcpGateDeliversRoundtrip()
 	{
-		await using var system = new ActorSystem();
+await using var system = new ActorSystem();
 		var echo = await system.CreateActorAsync(() => new EchoActor()).ConfigureAwait(false);
 		var routerSource = new TaskCompletionSource<TestSessionRouter>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var options = new GateServerOptions
@@ -32,11 +32,12 @@ public sealed class GateServerTests
 
 		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
 		await gate.StartAsync().ConfigureAwait(false);
-		var endpoint = gate.TcpEndpoint.Should().NotBeNull().Subject;
+		var endpoint = gate.TcpEndpoint;
+		endpoint.Should().NotBeNull();
 
-		await using var client = new TcpClient();
+		using var client = new TcpClient();
 		await client.ConnectAsync(endpoint!.Address, endpoint.Port).ConfigureAwait(false);
-		await using var stream = client.GetStream();
+		using var stream = client.GetStream();
 
 		await WriteFrameAsync(stream, "hello").ConfigureAwait(false);
 		var response = await ReadFrameAsync(stream).ConfigureAwait(false);
@@ -71,11 +72,12 @@ public sealed class GateServerTests
 			}
 		};
 
-		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
+await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
 		await gate.StartAsync().ConfigureAwait(false);
-		var uri = gate.WebSocketEndpoint.Should().NotBeNull().Subject;
+		var uri = gate.WebSocketEndpoint;
+		uri.Should().NotBeNull();
 
-		await using var client = new ClientWebSocket();
+using var client = new ClientWebSocket();
 		await client.ConnectAsync(uri!, CancellationToken.None).ConfigureAwait(false);
 
 		await client.SendAsync(Encoding.UTF8.GetBytes("ping"), WebSocketMessageType.Binary, true, CancellationToken.None).ConfigureAwait(false);
@@ -120,20 +122,20 @@ public sealed class GateServerTests
 		await gate.StartAsync().ConfigureAwait(false);
 		var endpoint = gate.TcpEndpoint!;
 
-		await using (var client = new TcpClient())
-		{
-			await client.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
-			await using var stream = client.GetStream();
-			await WriteFrameAsync(stream, "one").ConfigureAwait(false);
-			await ReadFrameAsync(stream).ConfigureAwait(false);
-		}
+using (var client = new TcpClient())
+{
+await client.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
+		using var stream = client.GetStream();
+await WriteFrameAsync(stream, "one").ConfigureAwait(false);
+await ReadFrameAsync(stream).ConfigureAwait(false);
+}
 
 		var first = await firstRouter.Task.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 		await first.Closed.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
-		await using var secondClient = new TcpClient();
-		await secondClient.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
-		await using var secondStream = secondClient.GetStream();
+using var secondClient = new TcpClient();
+await secondClient.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
+using var secondStream = secondClient.GetStream();
 		await WriteFrameAsync(secondStream, "two").ConfigureAwait(false);
 		var response = await ReadFrameAsync(secondStream).ConfigureAwait(false);
 		response.Should().Be("TWO");

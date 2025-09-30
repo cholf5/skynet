@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Core;
@@ -221,7 +222,7 @@ public sealed class RoomManager
 			}
 		}
 
-		internal bool TryRemove(ActorHandle participant, out RoomMember member)
+internal bool TryRemove(ActorHandle participant, [MaybeNullWhen(false)] out RoomMember member)
 		{
 			return _members.TryRemove(participant, out member);
 		}

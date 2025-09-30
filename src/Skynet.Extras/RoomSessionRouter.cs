@@ -158,47 +158,47 @@ public sealed class RoomSessionRouter : ISessionMessageRouter
                 await _manager.BroadcastTextAsync(room, formatted, cancellationToken).ConfigureAwait(false);
         }
 
-        private Task HandleListRoomsAsync(SessionContext context, CancellationToken cancellationToken)
-        {
-                var rooms = EnsureMembership(context);
-                var payload = rooms.Count == 0 ? "ROOMS none" : $"ROOMS {string.Join(',', rooms)}";
-                return context.SendAsync(payload, cancellationToken);
-        }
+	private Task HandleListRoomsAsync(SessionContext context, CancellationToken cancellationToken)
+	{
+		var rooms = EnsureMembership(context);
+		var payload = rooms.Count == 0 ? "ROOMS none" : $"ROOMS {string.Join(',', rooms)}";
+		return context.SendAsync(payload, cancellationToken).AsTask();
+	}
 
-        private Task HandleWhoAsync(SessionContext context, string[] parts, CancellationToken cancellationToken)
-        {
-                if (parts.Length < 2)
-                {
-                        return context.SendAsync("ERR missing-room", cancellationToken);
-                }
+	private Task HandleWhoAsync(SessionContext context, string[] parts, CancellationToken cancellationToken)
+	{
+		if (parts.Length < 2)
+	{
+		return context.SendAsync("ERR missing-room", cancellationToken).AsTask();
+}
 
-                var room = NormalizeRoom(parts[1]);
-                var members = _manager.GetMembers(room);
-                var payload = members.Count == 0 ? $"WHO {room} none" : $"WHO {room} {string.Join(',', members.Select(m => m.SessionId))}";
-                return context.SendAsync(payload, cancellationToken);
-        }
+		var room = NormalizeRoom(parts[1]);
+		var members = _manager.GetMembers(room);
+		var payload = members.Count == 0 ? $"WHO {room} none" : $"WHO {room} {string.Join(',', members.Select(m => m.SessionId))}";
+		return context.SendAsync(payload, cancellationToken).AsTask();
+		}
 
-        private Task HandleNickAsync(SessionContext context, string[] parts, CancellationToken cancellationToken)
-        {
-                if (parts.Length < 2)
-                {
-                        return context.SendAsync("ERR missing-alias", cancellationToken);
-                }
+	private Task HandleNickAsync(SessionContext context, string[] parts, CancellationToken cancellationToken)
+	{
+		if (parts.Length < 2)
+	{
+		return context.SendAsync("ERR missing-alias", cancellationToken).AsTask();
+}
 
-                var alias = parts[1].Trim();
-                if (alias.Length == 0 || alias.Length > 32)
-                {
-                        return context.SendAsync("ERR invalid-alias", cancellationToken);
-                }
+		var alias = parts[1].Trim();
+		if (alias.Length == 0 || alias.Length > 32)
+	{
+		return context.SendAsync("ERR invalid-alias", cancellationToken).AsTask();
+}
 
-                context.Items[AliasKey] = alias;
-                return context.SendAsync($"NICK {alias}", cancellationToken);
-        }
+		context.Items[AliasKey] = alias;
+		return context.SendAsync($"NICK {alias}", cancellationToken).AsTask();
+	}
 
-        private Task BroadcastSystemAsync(SessionContext context, string room, string message, CancellationToken cancellationToken)
-        {
-                return _manager.BroadcastTextAsync(room, $"[{room}] * {message}", cancellationToken);
-        }
+	private async Task BroadcastSystemAsync(SessionContext context, string room, string message, CancellationToken cancellationToken)
+	{
+		_ = await _manager.BroadcastTextAsync(room, $"[{room}] * {message}", cancellationToken).ConfigureAwait(false);
+	}
 
         private static HashSet<string> EnsureMembership(SessionContext context)
         {

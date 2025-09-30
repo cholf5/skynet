@@ -344,13 +344,13 @@ Envelope = 2,
 Heartbeat = 3
 }
 
-[MessagePackObject]
-private sealed record ClusterHandshake([property: Key(0)] string NodeId);
+[MessagePackObject(AllowPrivate = true)]
+internal sealed record ClusterHandshake([property: Key(0)] string NodeId);
 
-[MessagePackObject]
-private sealed record RemoteCallFault([property: Key(0)] bool IsCancellation, [property: Key(1)] string ExceptionType, [property: Key(2)] string? Message);
+[MessagePackObject(AllowPrivate = true)]
+internal sealed record RemoteCallFault([property: Key(0)] bool IsCancellation, [property: Key(1)] string ExceptionType, [property: Key(2)] string? Message);
 
-private sealed class TcpConnection : IAsyncDisposable
+internal sealed class TcpConnection : IAsyncDisposable
 {
 private readonly TcpTransport _transport;
 private readonly TcpClient _client;
@@ -507,11 +507,9 @@ _writeLock.Release();
 
 private async Task<(FrameType, ReadOnlyMemory<byte>)> ReadFrameAsync(CancellationToken cancellationToken)
 {
-var typeByte = await _stream.ReadByteAsync(cancellationToken).ConfigureAwait(false);
-if (typeByte == -1)
-{
-throw new IOException("Connection closed by remote peer.");
-}
+var typeBuffer = new byte[1];
+await ReadExactAsync(typeBuffer, cancellationToken).ConfigureAwait(false);
+var typeByte = typeBuffer[0];
 
 var lengthBuffer = new byte[4];
 await ReadExactAsync(lengthBuffer, cancellationToken).ConfigureAwait(false);

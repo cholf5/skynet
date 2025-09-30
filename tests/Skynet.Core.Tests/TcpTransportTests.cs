@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 using FluentAssertions;
+using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
 using Skynet.Core;
@@ -28,7 +29,7 @@ HandleOffset = 1000,
 Services = new Dictionary<string, long>(StringComparer.Ordinal)
 {
 ["echo"] = 1001
-}
+		}
 },
 new StaticClusterNodeConfiguration
 {
@@ -39,7 +40,7 @@ HandleOffset = 2000,
 Services = new Dictionary<string, long>(StringComparer.Ordinal)
 }
 }
-};
+			};
 
 var registry1 = new StaticClusterRegistry(configuration, "node1");
 var registry2 = new StaticClusterRegistry(configuration, "node2");
@@ -66,26 +67,27 @@ var result = await remote.CallAsync<string>(new EchoRequest("ping"), TimeSpan.Fr
 result.Should().Be("echo:pong");
 }
 
-private static int GetFreePort()
-{
-using var listener = new TcpListener(IPAddress.Loopback, 0);
-listener.Start();
-var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-listener.Stop();
-return port;
-}
+	private static int GetFreePort()
+	{
+		using var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+		var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+		listener.Stop();
+		return port;
+	}
 
-private sealed class EchoActor : Actor
-{
-protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
-{
-return envelope.Payload switch
-{
-EchoRequest request => Task.FromResult<object?>("echo:" + request.Message.Replace("ping", "pong", StringComparison.Ordinal)),
-_ => Task.FromResult<object?>(null)
-};
-}
-}
+	private sealed class EchoActor : Actor
+	{
+		protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+		{
+			return envelope.Payload switch
+			{
+				EchoRequest request => Task.FromResult<object?>("echo:" + request.Message.Replace("ping", "pong", StringComparison.Ordinal)),
+				_ => Task.FromResult<object?>(null)
+			};
+		}
+	}
 
-private sealed record EchoRequest(string Message);
+	[MessagePackObject(AllowPrivate = true)]
+internal sealed record EchoRequest([property: Key(0)] string Message);
 }

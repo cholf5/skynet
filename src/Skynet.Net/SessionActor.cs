@@ -16,7 +16,7 @@ public sealed class SessionActor : Actor
 	private bool _closing;
 	private bool _notified;
 
-	public SessionActor(ISessionConnection connection, SessionMetadata metadata, Func<SessionContext, ISessionMessageRouter> routerFactory)
+	internal SessionActor(ISessionConnection connection, SessionMetadata metadata, Func<SessionContext, ISessionMessageRouter> routerFactory)
 	{
 		_connection = connection ?? throw new ArgumentNullException(nameof(connection));
 		_metadata = metadata ?? throw new ArgumentNullException(nameof(metadata));

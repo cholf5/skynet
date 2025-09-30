@@ -84,7 +84,7 @@ public sealed class SessionContext
 	public ValueTask SendAsync(string text, CancellationToken cancellationToken = default)
 	{
 		ArgumentNullException.ThrowIfNull(text);
-		return _connection.SendAsync(System.Text.Encoding.UTF8.GetBytes(text), cancellationToken);
+		return _connection.SendAsync(Encoding.UTF8.GetBytes(text).AsMemory(), cancellationToken);
 	}
 
 	/// <summary>

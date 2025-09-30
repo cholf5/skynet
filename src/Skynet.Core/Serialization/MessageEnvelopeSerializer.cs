@@ -19,10 +19,10 @@ public sealed class SerializedMessageEnvelope
 	public CallType CallType { get; init; }
 
 	[Key(4)]
-	public string PayloadType { get; init; } = string.Empty;
+	public required string PayloadType { get; init; }
 
 	[Key(5)]
-	public byte[] Payload { get; init; } = Array.Empty<byte>();
+	public required byte[] Payload { get; init; }
 
 	[Key(6)]
 	public string? TraceId { get; init; }
@@ -70,17 +70,18 @@ public static class MessageEnvelopeSerializer
 		var payloadType = Type.GetType(dto.PayloadType, throwOnError: true) ?? throw new InvalidOperationException($"Unable to resolve payload type '{dto.PayloadType}'.");
 		var payload = MessagePackSerializer.Deserialize(payloadType, dto.Payload, options);
 		var timestamp = new DateTimeOffset(dto.Timestamp, TimeSpan.Zero);
-		var ttl = dto.TimeToLiveTicks.HasValue ? TimeSpan.FromTicks(dto.TimeToLiveTicks.Value) : null;
+		TimeSpan? ttl = dto.TimeToLiveTicks.HasValue ? TimeSpan.FromTicks(dto.TimeToLiveTicks.Value) : null;
 
-return new MessageEnvelope(
-dto.MessageId,
-new ActorHandle(dto.From),
-new ActorHandle(dto.To),
-dto.CallType,
-payload!,
-dto.TraceId,
-timestamp,
-ttl,
-dto.Version);
-}
+		return new MessageEnvelope(
+			dto.MessageId,
+			new ActorHandle(dto.From),
+			new ActorHandle(dto.To),
+			dto.CallType,
+			payload!,
+			dto.TraceId,
+			timestamp,
+			ttl,
+			dto.Version);
+	}
+
 }

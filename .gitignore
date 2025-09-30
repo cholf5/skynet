@@ -20,6 +20,7 @@ obj/
 ## Dotnet tools
 /.dotnet/
 /.tools/
+/.nuget/
 
 ## Test results
 TestResults/
