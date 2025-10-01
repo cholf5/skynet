@@ -1,4 +1,3 @@
-using System;
 using StackExchange.Redis;
 
 namespace Skynet.Cluster;
@@ -113,19 +112,13 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 		await _connection.DisposeAsync().ConfigureAwait(false);
 	}
 
-	private sealed class RedisSubscription : IDisposable
+	private sealed class RedisSubscription(
+		ISubscriber subscriber,
+		RedisChannel channel,
+		Action<RedisChannel, RedisValue> handler)
+		: IDisposable
 	{
-		private readonly ISubscriber _subscriber;
-		private readonly RedisChannel _channel;
-		private readonly Action<RedisChannel, RedisValue> _handler;
 		private bool _disposed;
-
-		public RedisSubscription(ISubscriber subscriber, RedisChannel channel, Action<RedisChannel, RedisValue> handler)
-		{
-			_subscriber = subscriber;
-			_channel = channel;
-			_handler = handler;
-		}
 
 		public void Dispose()
 		{
@@ -134,7 +127,7 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 				return;
 			}
 
-			_subscriber.UnsubscribeAsync(_channel, _handler).GetAwaiter().GetResult();
+			subscriber.UnsubscribeAsync(channel, handler).GetAwaiter().GetResult();
 			_disposed = true;
 		}
 	}

@@ -1,12 +1,12 @@
 # Skynet (.NET)
 
-> ⚠️ 该项目与 cloudwu/skynet 无官方关联，旨在探索 C# 生态下的极简 Actor 框架实现。
+> ⚠️ 该项目与 [cloudwu/skynet](https://github.com/cloudwu/skynet) 无官方关联，旨在探索 C# 生态下的极简 Actor 框架实现。
 
 Skynet 是一个面向游戏后端的 Actor 框架，目标是在 .NET 生态中还原 cloudwu/skynet 的开发体验，提供强类型接口、SourceGenerator 自动化与可插拔运行时组件。本仓库遵循 [MIT 许可证](LICENSE)。
 
 ## 仓库结构
 
-```
+```sh
 Skynet.sln
 ├── src/
 │   ├── Skynet.Core/         # 核心 Actor 运行时（ActorSystem、Registry 等）
@@ -33,7 +33,7 @@ Skynet.sln
 
 ```bash
 # 克隆仓库
-git clone https://github.com/<your-org>/Skynet.git
+git clone https://github.com/cholf5/skynet.git
 cd Skynet
 
 # 还原依赖并构建
@@ -87,29 +87,31 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 [SkynetActor("login", Unique = true)]
 public interface ILoginActor
 {
-Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
-ValueTask NotifyAsync(LoginNotice notice);
-string Ping(string name);
+	Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
+	ValueTask NotifyAsync(LoginNotice notice);
+	string Ping(string name);
 }
 
 public sealed class LoginActor : RpcActor<ILoginActor>, ILoginActor
 {
-public Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
-{
-return Task.FromResult(new LoginResponse(request.Username, $"Welcome {request.Username}!"));
-}
+	public Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
+	{
+		return Task.FromResult(new LoginResponse(request.Username, $"Welcome {request.Username}!"));
+	}
 
-public ValueTask NotifyAsync(LoginNotice notice)
-{
-// ...
-return ValueTask.CompletedTask;
-}
+	public ValueTask NotifyAsync(LoginNotice notice)
+	{
+		// ...
+		return ValueTask.CompletedTask;
+	}
 
-public string Ping(string name) => $"PONG: {name}";
+	public string Ping(string name) => $"PONG: {name}";
 }
 
 [MessagePackObject]
-public sealed record LoginRequest([property: Key(0)] string Username, [property: Key(1)] string Password);
+public sealed record LoginRequest(
+	[property: Key(0)] string Username,
+	[property: Key(1)] string Password);
 ```
 
 运行时可以通过 `ActorSystem.GetService<ILoginActor>("login")` 获取强类型代理，调用时自动封送并保证 `Send` / `Call` 语义，同时默认使用 MessagePack 进行序列化。
@@ -138,9 +140,9 @@ dotnet run --project src/Skynet.Examples/Skynet.Examples.csproj -- --cluster nod
 var manager = new RoomManager(system);
 var options = new GateServerOptions
 {
-TcpPort = 2013,
-WebSocketPort = 8080,
-RouterFactory = context => new RoomSessionRouter(manager)
+	TcpPort = 2013,
+	WebSocketPort = 8080,
+	RouterFactory = context => new RoomSessionRouter(manager)
 };
 
 await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
