@@ -1,8 +1,5 @@
-using System;
 using System.Collections.Concurrent;
 using System.Net;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Core;
@@ -22,7 +19,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	private readonly ConcurrentDictionary<string, NodeCacheEntry> _nodeCache = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<string, ActorHandle> _localServices = new(StringComparer.Ordinal);
 	private readonly CancellationTokenSource _cts = new();
-	private readonly object _registrationLock = new();
+	private readonly Lock _localServicesLock = new();
 	private readonly IDisposable _subscription;
 	private readonly Task _heartbeatTask;
 	private readonly string _nodeKey;
@@ -49,7 +46,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	}
 
 	/// <inheritdoc />
-	public string? LocalNodeId => _options.NodeId;
+	public string LocalNodeId => _options.NodeId;
 
 	/// <inheritdoc />
 	public bool TryResolveByName(string name, out ClusterActorLocation location)
@@ -66,7 +63,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		if (string.IsNullOrEmpty(value))
 		{
 			_nameCache.TryRemove(name, out _);
-			location = default!;
+			location = null!;
 			return false;
 		}
 
@@ -81,7 +78,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	{
 		if (!handle.IsValid)
 		{
-			location = default!;
+			location = null!;
 			return false;
 		}
 
@@ -96,7 +93,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		if (string.IsNullOrEmpty(value))
 		{
 			_handleCache.TryRemove(handle.Value, out _);
-			location = default!;
+			location = null!;
 			return false;
 		}
 
@@ -120,13 +117,13 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		var value = _client.GetString(NodeKey(nodeId));
 		if (string.IsNullOrEmpty(value))
 		{
-			descriptor = default!;
+			descriptor = null!;
 			return false;
 		}
 
 		if (!TryParseEndpoint(value, out var endpoint))
 		{
-			descriptor = default!;
+			descriptor = null!;
 			return false;
 		}
 
@@ -146,7 +143,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 		ThrowIfDisposed();
 
-		lock (_registrationLock)
+		lock (_localServicesLock)
 		{
 			if (_localServices.TryGetValue(name, out var existing) && existing != handle)
 			{
@@ -203,7 +200,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 		ThrowIfDisposed();
 
-		lock (_registrationLock)
+		lock (_localServicesLock)
 		{
 			_localServices.TryRemove(name, out _);
 			_nameCache.TryRemove(name, out _);
@@ -223,7 +220,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		}
 
 		_disposed = true;
-		_cts.Cancel();
+		await _cts.CancelAsync();
 		try
 		{
 			await _heartbeatTask.ConfigureAwait(false);
@@ -234,10 +231,13 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		}
 
 		_subscription.Dispose();
-		foreach (var pair in _localServices)
+		lock (_localServicesLock)
 		{
-			_client.KeyDelete(ServiceKey(pair.Key));
-			_client.KeyDelete(HandleKey(pair.Value.Value));
+			foreach (var pair in _localServices)
+			{
+				_client.KeyDelete(ServiceKey(pair.Key));
+				_client.KeyDelete(HandleKey(pair.Value.Value));
+			}
 		}
 
 		_client.KeyDelete(_nodeKey);
@@ -276,10 +276,13 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	{
 		var expiry = _options.RegistrationTtl;
 		_client.KeyExpire(_nodeKey, expiry);
-		foreach (var pair in _localServices)
+		lock (_localServicesLock)
 		{
-			_client.KeyExpire(ServiceKey(pair.Key), expiry);
-			_client.KeyExpire(HandleKey(pair.Value.Value), expiry);
+			foreach (var pair in _localServices)
+			{
+				_client.KeyExpire(ServiceKey(pair.Key), expiry);
+				_client.KeyExpire(HandleKey(pair.Value.Value), expiry);
+			}
 		}
 	}
 
@@ -319,7 +322,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			return true;
 		}
 
-		location = default!;
+		location = null!;
 		return false;
 	}
 
@@ -331,7 +334,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			return true;
 		}
 
-		location = default!;
+		location = null!;
 		return false;
 	}
 
@@ -343,7 +346,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			return true;
 		}
 
-		descriptor = default!;
+		descriptor = null!;
 		return false;
 	}
 
@@ -437,13 +440,13 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		var parts = value.Split('|', StringSplitOptions.RemoveEmptyEntries);
 		if (parts.Length != 2 || !int.TryParse(parts[1], out var port))
 		{
-			endpoint = default!;
+			endpoint = null!;
 			return false;
 		}
 
 		if (!IPAddress.TryParse(parts[0], out var address))
 		{
-			endpoint = default!;
+			endpoint = null!;
 			return false;
 		}
 

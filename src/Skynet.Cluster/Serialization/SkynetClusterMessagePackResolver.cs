@@ -1,6 +1,6 @@
 namespace Skynet.Cluster.Serialization;
 
-[global::MessagePack.GeneratedMessagePackResolver]
+[MessagePack.GeneratedMessagePackResolver]
 internal partial class SkynetClusterMessagePackResolver
 {
 }
