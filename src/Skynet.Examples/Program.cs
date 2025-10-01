@@ -1,10 +1,5 @@
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
@@ -20,7 +15,7 @@ public static class Program
 	{
 		if (args.Length >= 2 && string.Equals(args[0], "--cluster", StringComparison.OrdinalIgnoreCase))
 		{
-			await RunClusterSampleAsync(args[1]).CAF();
+			await RunClusterSampleAsync(args[1]).Caf();
 			return;
 		}
 
@@ -30,37 +25,38 @@ public static class Program
 			{
 				case "--gate":
 				case "--rooms":
-				await RunRoomSampleAsync().CAF();
-				return;
+					await RunRoomSampleAsync().Caf();
+					return;
 				case "--debug-console":
-				await RunDebugConsoleSampleAsync().CAF();
-				return;
+					await RunDebugConsoleSampleAsync().Caf();
+					return;
 				case "--rooms-bench":
-				await RunRoomBenchmarkAsync().CAF();
-				return;
+					await RunRoomBenchmarkAsync().Caf();
+					return;
 				case "--cluster" when args.Length >= 2:
-				break;
-				default:
-				break;
+					break;
 			}
 		}
 
-		await RunLocalSampleAsync().CAF();
+		await RunLocalSampleAsync().Caf();
 	}
 
 	private static async Task RunLocalSampleAsync()
 	{
 		Console.WriteLine("Bootstrapping Skynet runtime with generated login proxy...");
+		// Create an actor system and register a login actor
 		await using var system = new ActorSystem();
-		await system.CreateActorAsync(() => new LoginActor(), "login").CAF();
+		await system.CreateActorAsync(() => new LoginActor(), "login").Caf();
+		// Interact with the login actor via the generated proxy interface
 		var login = system.GetService<ILoginActor>("login");
-		var welcome = await login.LoginAsync(new LoginRequest("demo", "password")).CAF();
+		var welcome = await login.LoginAsync(new LoginRequest("demo", "password")).Caf();
 		Console.WriteLine($"Login => {welcome.WelcomeMessage}");
-		await login.NotifyAsync(new LoginNotice(welcome.Username, "connected")).CAF();
+		await login.NotifyAsync(new LoginNotice(welcome.Username, "connected")).Caf();
 		Console.WriteLine($"Ping => {login.Ping(welcome.Username)}");
 
-		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").CAF();
-		Console.WriteLine("Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an empty line to exit.");
+		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").Caf();
+		Console.WriteLine(
+			"Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an empty line to exit.");
 
 		while (true)
 		{
@@ -71,8 +67,8 @@ public static class Program
 				break;
 			}
 
-			await echo.SendAsync(new EchoNotice(line)).CAF();
-			var response = await echo.CallAsync<string>(new EchoRequest(line)).CAF();
+			await echo.SendAsync(new EchoNotice(line)).Caf();
+			var response = await echo.CallAsync<string>(new EchoRequest(line)).Caf();
 			Console.WriteLine($"[reply] {response}");
 		}
 
@@ -83,8 +79,8 @@ public static class Program
 	{
 		var configuration = new StaticClusterConfiguration
 		{
-			Nodes = new[]
-			{
+			Nodes =
+			[
 				new StaticClusterNodeConfiguration
 				{
 					NodeId = "node1",
@@ -103,31 +99,32 @@ public static class Program
 					Port = 9102,
 					HandleOffset = 2000
 				}
-			}
+			]
 		};
 
 		var registry = new StaticClusterRegistry(configuration, nodeId);
 		var options = new ActorSystemOptions { ClusterRegistry = registry };
 		await using var system = new ActorSystem(
-		options: options,
-		transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
-		{
-			HeartbeatInterval = TimeSpan.FromSeconds(5)
-		}, NullLoggerFactory.Instance));
+			options: options,
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(5)
+			}, NullLoggerFactory.Instance));
 
 		if (string.Equals(nodeId, "node1", StringComparison.OrdinalIgnoreCase))
 		{
 			await system.CreateActorAsync(() => new EchoActor(), "echo", new ActorCreationOptions
 			{
 				HandleOverride = new ActorHandle(1001)
-			}).CAF();
+			}).Caf();
 			Console.WriteLine("Node1 listening on 127.0.0.1:9101. Press ENTER to exit.");
 			Console.ReadLine();
 			return;
 		}
 
 		var remote = system.GetByName("echo");
-		Console.WriteLine("Node2 connected to node1 via TCP. Type messages to call the remote echo actor. Empty line exits.");
+		Console.WriteLine(
+			"Node2 connected to node1 via TCP. Type messages to call the remote echo actor. Empty line exits.");
 		while (true)
 		{
 			Console.Write("> ");
@@ -137,7 +134,7 @@ public static class Program
 				break;
 			}
 
-			var reply = await remote.CallAsync<string>(new EchoRequest(line), TimeSpan.FromSeconds(5)).CAF();
+			var reply = await remote.CallAsync<string>(new EchoRequest(line), TimeSpan.FromSeconds(5)).Caf();
 			Console.WriteLine($"[remote] {reply}");
 		}
 	}
@@ -147,7 +144,7 @@ public static class Program
 	{
 		Console.WriteLine("Starting actor system with debug console on 127.0.0.1:4015...");
 		await using var system = new ActorSystem();
-		await system.CreateActorAsync(() => new EchoActor(), "echo").CAF();
+		await system.CreateActorAsync(() => new EchoActor(), "echo").Caf();
 		var gateway = new ActorSystemDebugConsoleGateway(system);
 		var options = new DebugConsoleOptions
 		{
@@ -156,13 +153,13 @@ public static class Program
 		};
 
 		await using var console = new DebugConsoleServer(gateway, options);
-		await console.StartAsync().CAF();
+		await console.StartAsync().Caf();
 
 		Console.WriteLine("Connect with `telnet 127.0.0.1 4015` and type 'help' to inspect actors.");
 		Console.WriteLine("Press ENTER to stop the console.");
 		Console.ReadLine();
 
-		await console.StopAsync().CAF();
+		await console.StopAsync().Caf();
 	}
 
 	private static async Task RunRoomSampleAsync()
@@ -178,23 +175,25 @@ public static class Program
 		};
 
 		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
-		await gate.StartAsync().CAF();
+		await gate.StartAsync().Caf();
 
 		Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
 		Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
-		Console.WriteLine("Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
+		Console.WriteLine(
+			"Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
 		Console.WriteLine("Press ENTER to stop the gate server.");
 		Console.ReadLine();
 
 		Console.WriteLine("Stopping gate server...");
-		await gate.StopAsync().CAF();
+		await gate.StopAsync().Caf();
 	}
 
 	private static async Task RunRoomBenchmarkAsync()
 	{
 		const int sessionCount = 200;
 		const int iterations = 1000;
-		Console.WriteLine($"Running broadcast benchmark with {sessionCount} simulated sessions and {iterations} rounds...");
+		Console.WriteLine(
+			$"Running broadcast benchmark with {sessionCount} simulated sessions and {iterations} rounds...");
 
 		await using var system = new ActorSystem();
 		var manager = new RoomManager(system);
@@ -204,7 +203,7 @@ public static class Program
 		{
 			var loopback = new RoomLoopbackActor();
 			actors.Add(loopback);
-			var actor = await system.CreateActorAsync(() => loopback).CAF();
+			var actor = await system.CreateActorAsync(() => loopback).Caf();
 			var metadata = new SessionMetadata($"bench-{i}", "loop", null, DateTimeOffset.UtcNow);
 			manager.Join("load-test", new RoomParticipant(actor.Handle, metadata));
 		}
@@ -213,8 +212,9 @@ public static class Program
 		var stopwatch = Stopwatch.StartNew();
 		for (var i = 0; i < iterations; i++)
 		{
-			await manager.BroadcastAsync("load-test", payload).CAF();
+			await manager.BroadcastAsync("load-test", payload).Caf();
 		}
+
 		stopwatch.Stop();
 
 		var totalMessages = sessionCount * iterations;
@@ -232,13 +232,13 @@ public static class Program
 			switch (envelope.Payload)
 			{
 				case EchoNotice notice:
-				Console.WriteLine($"[send] {notice.Message}");
-				return Task.FromResult<object?>(null);
+					Console.WriteLine($"[send] {notice.Message}");
+					return Task.FromResult<object?>(null);
 				case EchoRequest request:
-				Console.WriteLine($"[call] {request.Message}");
-				return Task.FromResult<object?>(request.Message);
+					Console.WriteLine($"[call] {request.Message}");
+					return Task.FromResult<object?>(request.Message);
 				default:
-				throw new InvalidOperationException($"Unknown message type {envelope.Payload?.GetType().Name}.");
+					throw new InvalidOperationException($"Unknown message type {envelope.Payload?.GetType().Name}.");
 			}
 		}
 	}

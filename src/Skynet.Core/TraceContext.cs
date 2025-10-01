@@ -1,7 +1,5 @@
-using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Threading;
 
 namespace Skynet.Core;
 
@@ -11,15 +9,15 @@ namespace Skynet.Core;
 /// </summary>
 public static class TraceContext
 {
-	private static readonly AsyncLocal<string?> _traceId = new();
+	private static readonly AsyncLocal<string?> TraceId = new();
 
 	/// <summary>
 	/// Gets or sets the trace identifier associated with the current asynchronous flow.
 	/// </summary>
 	public static string? CurrentTraceId
 	{
-		get => _traceId.Value;
-		set => _traceId.Value = value;
+		get => TraceId.Value;
+		set => TraceId.Value = value;
 	}
 
 	/// <summary>
@@ -29,7 +27,7 @@ public static class TraceContext
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string EnsureTraceId()
 	{
-		var traceId = _traceId.Value;
+		var traceId = TraceId.Value;
 		if (!string.IsNullOrEmpty(traceId))
 		{
 			return traceId;
@@ -45,7 +43,7 @@ public static class TraceContext
 			traceId = Guid.NewGuid().ToString("N");
 		}
 
-		_traceId.Value = traceId;
+		TraceId.Value = traceId;
 		return traceId;
 	}
 
@@ -56,23 +54,16 @@ public static class TraceContext
 	/// <returns>A disposable scope that restores the previous identifier when disposed.</returns>
 	public static IDisposable BeginScope(string? traceId)
 	{
-		var previous = _traceId.Value;
-		_traceId.Value = traceId ?? previous ?? EnsureTraceId();
+		var previous = TraceId.Value;
+		TraceId.Value = traceId ?? previous ?? EnsureTraceId();
 		return new Scope(previous);
 	}
 
-	private sealed class Scope : IDisposable
+	private sealed class Scope(string? previous) : IDisposable
 	{
-		private readonly string? _previous;
-
-		public Scope(string? previous)
-		{
-			_previous = previous;
-		}
-
 		public void Dispose()
 		{
-			_traceId.Value = _previous;
+			TraceId.Value = previous;
 		}
 	}
 }
