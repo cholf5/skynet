@@ -355,8 +355,7 @@ public sealed class ActorSystem : IAsyncDisposable
 			return false;
 		}
 
-		string? name = null;
-		if (_handleToName.TryRemove(handle.Value, out name))
+		if (_handleToName.TryRemove(handle.Value, out string? name))
 		{
 			_nameToHandle.TryRemove(name, out _);
 			if (notifyRegistry && _clusterRegistry is not null)

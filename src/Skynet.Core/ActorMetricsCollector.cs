@@ -1,8 +1,4 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
 
 namespace Skynet.Core;
 
@@ -99,7 +95,7 @@ public sealed class ActorMetricsCollector
 			return true;
 		}
 
-		snapshot = default!;
+		snapshot = null!;
 		return false;
 	}
 
@@ -110,18 +106,12 @@ public sealed class ActorMetricsCollector
 	{
 		var entries = _entries.Values.ToArray();
 		var result = new List<ActorMetricsSnapshot>(entries.Length);
-		foreach (var entry in entries)
-		{
-			result.Add(entry.CreateSnapshot());
-		}
+		result.AddRange(entries.Select(entry => entry.CreateSnapshot()));
 		return result;
 	}
 
-	private sealed class ActorMetricsEntry
+	private sealed class ActorMetricsEntry(ActorHandle handle, string? name, Type implementationType)
 	{
-		private readonly ActorHandle _handle;
-		private readonly string? _name;
-		private readonly Type _implementationType;
 		private readonly DateTimeOffset _createdAt = DateTimeOffset.UtcNow;
 		private long _queueLength;
 		private long _processedCount;
@@ -130,13 +120,6 @@ public sealed class ActorMetricsCollector
 		private long _lastEnqueuedTicks;
 		private long _lastProcessedTicks;
 		private int _traceEnabled;
-
-		public ActorMetricsEntry(ActorHandle handle, string? name, Type implementationType)
-		{
-			_handle = handle;
-			_name = name;
-			_implementationType = implementationType;
-		}
 
 		public bool TraceEnabled => Volatile.Read(ref _traceEnabled) == 1;
 
@@ -180,17 +163,17 @@ public sealed class ActorMetricsCollector
 			var lastEnqueued = Interlocked.Read(ref _lastEnqueuedTicks);
 			var lastProcessed = Interlocked.Read(ref _lastProcessedTicks);
 			return new ActorMetricsSnapshot(
-			_handle,
-			_name,
-			_implementationType,
-			Interlocked.Read(ref _queueLength),
-			processed,
-			Interlocked.Read(ref _exceptionCount),
-			average,
-			lastEnqueued > 0 ? new DateTimeOffset(lastEnqueued, TimeSpan.Zero) : null,
-			lastProcessed > 0 ? new DateTimeOffset(lastProcessed, TimeSpan.Zero) : null,
-			_createdAt,
-			TraceEnabled);
+				handle,
+				name,
+				implementationType,
+				Interlocked.Read(ref _queueLength),
+				processed,
+				Interlocked.Read(ref _exceptionCount),
+				average,
+				lastEnqueued > 0 ? new DateTimeOffset(lastEnqueued, TimeSpan.Zero) : null,
+				lastProcessed > 0 ? new DateTimeOffset(lastProcessed, TimeSpan.Zero) : null,
+				_createdAt,
+				TraceEnabled);
 		}
 	}
 }
@@ -208,9 +191,10 @@ internal static class InterlockedExtensions
 			{
 				return 0;
 			}
+
 			computed = initial - 1;
-		}
-		while (Interlocked.CompareExchange(ref location, computed, initial) != initial);
+		} while (Interlocked.CompareExchange(ref location, computed, initial) != initial);
+
 		return computed;
 	}
 }

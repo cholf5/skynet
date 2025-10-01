@@ -1,4 +1,3 @@
-using System.Threading.Tasks;
 using MessagePack;
 namespace Skynet.Core;
 
@@ -18,7 +17,7 @@ public sealed class ActorRef
 	/// </summary>
 	public ActorHandle Handle { get; }
 
-	internal ActorSystem System { get; }
+	private ActorSystem System { get; }
 
 	/// <summary>
 	/// Sends a fire-and-forget message to the actor.

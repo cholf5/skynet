@@ -1,8 +1,5 @@
-using System;
 using System.Diagnostics;
-using System.Threading;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace Skynet.Core;
@@ -11,7 +8,6 @@ internal sealed class ActorHost : IAsyncDisposable
 {
 	private readonly Channel<MailboxMessage> _mailbox;
 	private readonly ActorMetricsCollector _metrics;
-	private readonly string? _name;
 	private readonly CancellationTokenSource _cts = new();
 	private readonly Task _loop;
 	private readonly TaskCompletionSource<bool> _startup = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -25,14 +21,13 @@ internal sealed class ActorHost : IAsyncDisposable
 		Actor = actor;
 		Logger = logger;
 		_metrics = metrics;
-		_name = name;
 		_mailbox = Channel.CreateUnbounded<MailboxMessage>(new UnboundedChannelOptions
 		{
 			SingleReader = true,
 			SingleWriter = false,
 			AllowSynchronousContinuations = false
 		});
-		_metrics.RegisterActor(handle, _name, actor.GetType());
+		_metrics.RegisterActor(handle, name, actor.GetType());
 		Actor.Attach(this);
 		_loop = Task.Run(RunAsync);
 	}
@@ -113,7 +108,7 @@ internal sealed class ActorHost : IAsyncDisposable
 		var traceEnabled = _metrics.IsTracing(Handle);
 		if (traceEnabled)
 		{
-			Logger.LogInformation("Trace[{Handle}] >> {MessageId} {CallType} {PayloadType}", Handle.Value, envelope.MessageId, envelope.CallType, envelope.Payload?.GetType().Name ?? "null");
+			Logger.LogInformation("Trace[{Handle}] >> {MessageId} {CallType} {PayloadType}", Handle.Value, envelope.MessageId, envelope.CallType, envelope.Payload.GetType().Name);
 		}
 
 		try
@@ -172,7 +167,7 @@ internal sealed class ActorHost : IAsyncDisposable
 
 	public async ValueTask DisposeAsync()
 	{
-		_cts.Cancel();
+		await _cts.CancelAsync();
 		_mailbox.Writer.TryComplete();
 		try
 		{
