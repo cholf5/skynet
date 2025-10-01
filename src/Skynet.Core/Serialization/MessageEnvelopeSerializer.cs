@@ -1,4 +1,3 @@
-using System;
 using MessagePack;
 
 namespace Skynet.Core.Serialization;

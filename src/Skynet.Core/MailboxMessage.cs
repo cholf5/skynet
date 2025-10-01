@@ -1,16 +1,8 @@
-using System.Threading.Tasks;
-
 namespace Skynet.Core;
 
-internal sealed class MailboxMessage
+internal sealed class MailboxMessage(MessageEnvelope envelope, TaskCompletionSource<object?>? completion)
 {
-	public MailboxMessage(MessageEnvelope envelope, TaskCompletionSource<object?>? completion)
-	{
-		Envelope = envelope;
-		Completion = completion;
-	}
+	public MessageEnvelope Envelope { get; } = envelope;
 
-	public MessageEnvelope Envelope { get; }
-
-	public TaskCompletionSource<object?>? Completion { get; }
+	public TaskCompletionSource<object?>? Completion { get; } = completion;
 }

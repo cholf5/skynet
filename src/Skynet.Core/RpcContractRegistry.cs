@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Concurrent;
 using MessagePack;
 
@@ -9,7 +8,7 @@ public static class RpcContractRegistry
 	private static readonly ConcurrentDictionary<Type, object> Dispatchers = new();
 	private static readonly ConcurrentDictionary<Type, Func<ActorRef, MessagePackSerializerOptions?, object>> ProxyFactories = new();
 	private static readonly ConcurrentDictionary<Type, (string? ServiceName, bool Unique)> Metadata = new();
-	private static readonly object SyncRoot = new();
+	private static readonly Lock SyncRoot = new();
 
 	public static void Register<TContract>(IRpcDispatcher<TContract> dispatcher, Func<ActorRef, MessagePackSerializerOptions?, TContract> proxyFactory, string? serviceName, bool unique)
 		where TContract : class
@@ -32,7 +31,7 @@ public static class RpcContractRegistry
 				Dispatchers[contractType] = dispatcher;
 			}
 
-			ProxyFactories[contractType] = (actor, options) => proxyFactory(actor, options);
+			ProxyFactories[contractType] = proxyFactory;
 			Metadata[contractType] = (serviceName, unique);
 		}
 	}
