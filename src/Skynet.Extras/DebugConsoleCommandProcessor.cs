@@ -1,10 +1,5 @@
-using System;
 using System.Globalization;
-using System.Linq;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using Skynet.Core;
 
 namespace Skynet.Extras;
 
@@ -13,15 +8,15 @@ namespace Skynet.Extras;
 /// </summary>
 public sealed class DebugConsoleCommandProcessor
 {
-	private static readonly string[] HelpLines = new[]
-	{
+	private static readonly string[] HelpLines =
+	[
 		"help                 - Show this help text",
 		"list                 - Display all registered actors and key metrics",
 		"info <id|name>       - Display detailed metrics for a specific actor",
 		"trace <id|name> [on|off] - Toggle or set tracing for an actor",
 		"kill <id|name>       - Terminate an actor",
 		"exit                 - Close the current console session"
-	};
+	];
 
 	private readonly IDebugConsoleActorGateway _gateway;
 

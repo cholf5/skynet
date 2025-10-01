@@ -1,12 +1,9 @@
-using System;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Skynet.Core;
 
 namespace Skynet.Extras;
 
@@ -51,7 +48,7 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 		var address = ParseAddress(_options.Host);
 		_listener = new TcpListener(address, _options.Port);
 		_listener.Start(_options.Backlog);
-		_acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
+		_acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token), cancellationToken);
 		_logger.LogInformation("Debug console listening on {Host}:{Port}.", address, _options.Port);
 		return Task.CompletedTask;
 	}
@@ -66,7 +63,7 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 			return;
 		}
 
-		_cts.Cancel();
+		await _cts.CancelAsync();
 		try
 		{
 			_listener.Stop();
@@ -99,7 +96,9 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 			try
 			{
 				client = await _listener!.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
-				_ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
+				var clientCopy = client; // Create a copy to avoid closure over mutable variable
+				_ = Task.Run(() => HandleClientAsync(clientCopy, cancellationToken), cancellationToken);
+				client = null; // Prevent disposal in catch blocks since ownership is transferred
 			}
 			catch (OperationCanceledException)
 			{
@@ -132,7 +131,8 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 				return;
 			}
 
-			await using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+			await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+			writer.AutoFlush = true;
 			using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
 			await writer.WriteLineAsync("Skynet Debug Console").ConfigureAwait(false);
 			await writer.WriteLineAsync("Type 'help' for available commands.").ConfigureAwait(false);
@@ -148,7 +148,7 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 			while (!linkedCts.IsCancellationRequested)
 			{
 				await writer.WriteAsync("> ").ConfigureAwait(false);
-				var line = await reader.ReadLineAsync().ConfigureAwait(false);
+				var line = await reader.ReadLineAsync(linkedCts.Token).ConfigureAwait(false);
 				if (line is null)
 				{
 					break;
@@ -191,7 +191,7 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 		while (!cancellationToken.IsCancellationRequested)
 		{
 			await writer.WriteAsync("> ").ConfigureAwait(false);
-			var line = await reader.ReadLineAsync().ConfigureAwait(false);
+			var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
 			if (line is null)
 			{
 				return false;

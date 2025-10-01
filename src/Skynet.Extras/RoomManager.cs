@@ -11,18 +11,12 @@ namespace Skynet.Extras;
 /// <summary>
 /// Provides membership and broadcast management for logical rooms that map to session actors.
 /// </summary>
-public sealed class RoomManager
+public sealed class RoomManager(ActorSystem system, ILogger<RoomManager>? logger = null)
 {
-	private readonly ActorSystem _system;
-	private readonly ILogger<RoomManager> _logger;
+	private readonly ActorSystem _system = system ?? throw new ArgumentNullException(nameof(system));
+	private readonly ILogger<RoomManager> _logger = logger ?? NullLogger<RoomManager>.Instance;
 	private readonly ConcurrentDictionary<string, Room> _rooms = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<ActorHandle, ConcurrentDictionary<string, byte>> _memberships = new();
-
-	public RoomManager(ActorSystem system, ILogger<RoomManager>? logger = null)
-	{
-		_system = system ?? throw new ArgumentNullException(nameof(system));
-		_logger = logger ?? NullLogger<RoomManager>.Instance;
-	}
 
 	/// <summary>
 	/// Registers a participant with the specified room.
@@ -41,7 +35,8 @@ public sealed class RoomManager
 
 		var room = _rooms.GetOrAdd(roomId, static id => new Room(id));
 		var member = room.AddOrUpdate(participant, out var added);
-		var membership = _memberships.GetOrAdd(participant.Handle, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
+		var membership = _memberships.GetOrAdd(participant.Handle,
+			_ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
 		membership[roomId] = 0;
 		var isNewRoom = added && room.Count == 1;
 		return new RoomJoinResult(member, added, isNewRoom);
@@ -83,18 +78,14 @@ public sealed class RoomManager
 	/// </summary>
 	public IReadOnlyList<RoomMember> GetMembers(string roomId)
 	{
-		if (!_rooms.TryGetValue(roomId, out var room))
-		{
-			return Array.Empty<RoomMember>();
-		}
-
-		return room.Snapshot();
+		return !_rooms.TryGetValue(roomId, out var room) ? [] : room.Snapshot();
 	}
 
 	/// <summary>
 	/// Broadcasts a binary payload to all members of the specified room.
 	/// </summary>
-	public async Task<RoomBroadcastResult> BroadcastAsync(string roomId, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default)
+	public async Task<RoomBroadcastResult> BroadcastAsync(string roomId, ReadOnlyMemory<byte> payload,
+		CancellationToken cancellationToken = default)
 	{
 		if (!_rooms.TryGetValue(roomId, out var room))
 		{
@@ -115,12 +106,14 @@ public sealed class RoomManager
 			cancellationToken.ThrowIfCancellationRequested();
 			try
 			{
-				await _system.SendAsync(member.SessionHandle, new SessionOutboundMessage(payload), cancellationToken: cancellationToken).ConfigureAwait(false);
+				await _system.SendAsync(member.SessionHandle, new SessionOutboundMessage(payload),
+					cancellationToken: cancellationToken).ConfigureAwait(false);
 				delivered++;
 			}
 			catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
 			{
-				_logger.LogDebug(ex, "Removing stale session {SessionId} from room {RoomId}.", member.SessionId, roomId);
+				_logger.LogDebug(ex, "Removing stale session {SessionId} from room {RoomId}.", member.SessionId,
+					roomId);
 				failures.Add(member);
 			}
 		}
@@ -136,7 +129,8 @@ public sealed class RoomManager
 	/// <summary>
 	/// Broadcasts a UTF-8 text payload to all members of the specified room.
 	/// </summary>
-	public Task<RoomBroadcastResult> BroadcastTextAsync(string roomId, string text, CancellationToken cancellationToken = default)
+	public Task<RoomBroadcastResult> BroadcastTextAsync(string roomId, string text,
+		CancellationToken cancellationToken = default)
 	{
 		ArgumentNullException.ThrowIfNull(text);
 		return BroadcastAsync(roomId, Encoding.UTF8.GetBytes(text), cancellationToken);
@@ -213,7 +207,8 @@ public sealed class RoomManager
 					return existing;
 				}
 
-				var member = new RoomMember(Id, participant.Handle, participant.Metadata.SessionId, participant.Metadata, DateTimeOffset.UtcNow);
+				var member = new RoomMember(Id, participant.Handle, participant.Metadata.SessionId,
+					participant.Metadata, DateTimeOffset.UtcNow);
 				if (_members.TryAdd(participant.Handle, member))
 				{
 					added = true;
@@ -222,7 +217,7 @@ public sealed class RoomManager
 			}
 		}
 
-internal bool TryRemove(ActorHandle participant, [MaybeNullWhen(false)] out RoomMember member)
+		internal bool TryRemove(ActorHandle participant, [MaybeNullWhen(false)] out RoomMember member)
 		{
 			return _members.TryRemove(participant, out member);
 		}
@@ -249,7 +244,10 @@ public readonly record struct RoomJoinResult(RoomMember Member, bool Added, bool
 /// </summary>
 public readonly record struct RoomLeaveResult(RoomMember? Member, bool RoomEmpty)
 {
-	public static RoomLeaveResult Empty { get; } = new(null, false);
+	public static RoomLeaveResult Empty
+	{
+		get;
+	} = new(null, false);
 }
 
 /// <summary>
@@ -257,10 +255,18 @@ public readonly record struct RoomLeaveResult(RoomMember? Member, bool RoomEmpty
 /// </summary>
 public readonly record struct RoomBroadcastResult(int Attempted, int Delivered, int Evicted)
 {
-	public static RoomBroadcastResult Empty { get; } = new(0, 0, 0);
+	public static RoomBroadcastResult Empty
+	{
+		get;
+	} = new(0, 0, 0);
 }
 
 /// <summary>
 /// Describes a room member snapshot.
 /// </summary>
-public sealed record RoomMember(string RoomId, ActorHandle SessionHandle, string SessionId, SessionMetadata Metadata, DateTimeOffset JoinedAt);
+public sealed record RoomMember(
+	string RoomId,
+	ActorHandle SessionHandle,
+	string SessionId,
+	SessionMetadata Metadata,
+	DateTimeOffset JoinedAt);
