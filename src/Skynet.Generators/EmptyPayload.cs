@@ -1,10 +1,9 @@
 using System.Runtime.CompilerServices;
 
-namespace Skynet.Core.RpcMessages
+namespace Skynet.Generators;
+
+[MessagePack.MessagePackObject]
+[CompilerGenerated]
+public sealed class EmptyPayload
 {
-	[global::MessagePack.MessagePackObject]
-	[CompilerGenerated]
-	public sealed partial class EmptyPayload
-	{
-	}
 }

@@ -63,9 +63,9 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 	public void Initialize(IncrementalGeneratorInitializationContext context)
 	{
 		var contracts = context.SyntaxProvider.ForAttributeWithMetadataName(
-				AttributeMetadataName,
-				static (node, _) => node is InterfaceDeclarationSyntax,
-				static (syntaxContext, cancellationToken) => CreateModel(syntaxContext, cancellationToken));
+			AttributeMetadataName,
+			static (node, _) => node is InterfaceDeclarationSyntax,
+			static (syntaxContext, cancellationToken) => CreateModel(syntaxContext, cancellationToken));
 
 		context.RegisterSourceOutput(contracts, static (sourceContext, result) =>
 		{
@@ -85,40 +85,49 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		});
 	}
 
-	private static ContractGenerationResult CreateModel(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
+	private static ContractGenerationResult CreateModel(GeneratorAttributeSyntaxContext context,
+		CancellationToken cancellationToken)
 	{
 		if (context.TargetSymbol is not INamedTypeSymbol interfaceSymbol)
 		{
-			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), context.TargetSymbol?.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ?? "unknown"));
+			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor,
+				context.TargetNode.GetLocation(),
+				context.TargetSymbol?.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ?? "unknown"));
 		}
 
 		if (interfaceSymbol.TypeKind != TypeKind.Interface)
 		{
-			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
+			return ContractGenerationResult.Failure(Diagnostic.Create(InvalidTargetDescriptor,
+				context.TargetNode.GetLocation(),
+				interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 		}
 
 		if (interfaceSymbol.IsGenericType)
 		{
-			return ContractGenerationResult.Failure(Diagnostic.Create(GenericInterfaceDescriptor, context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
+			return ContractGenerationResult.Failure(Diagnostic.Create(GenericInterfaceDescriptor,
+				context.TargetNode.GetLocation(),
+				interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 		}
 
 		var attributeData = context.Attributes[0];
 		string? serviceName = null;
 		var unique = false;
-		if (attributeData.ConstructorArguments.Length > 0 && attributeData.ConstructorArguments[0].Value is string ctorName)
+		if (attributeData.ConstructorArguments.Length > 0 &&
+		    attributeData.ConstructorArguments[0].Value is string ctorName)
 		{
 			serviceName = string.IsNullOrWhiteSpace(ctorName) ? null : ctorName;
 		}
 
 		foreach (var named in attributeData.NamedArguments)
 		{
-			if (named.Key == "Name" && named.Value.Value is string namedValue)
+			switch (named)
 			{
-				serviceName = string.IsNullOrWhiteSpace(namedValue) ? null : namedValue;
-			}
-			else if (named.Key == "Unique" && named.Value.Value is bool uniqueValue)
-			{
-				unique = uniqueValue;
+				case { Key: "Name", Value.Value: string namedValue }:
+					serviceName = string.IsNullOrWhiteSpace(namedValue) ? null : namedValue;
+					break;
+				case { Key: "Unique", Value.Value: bool uniqueValue }:
+					unique = uniqueValue;
+					break;
 			}
 		}
 
@@ -141,7 +150,9 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 
 			if (method.TypeParameters.Length > 0)
 			{
-				return ContractGenerationResult.Failure(Diagnostic.Create(GenericMethodDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
+				return ContractGenerationResult.Failure(Diagnostic.Create(GenericMethodDescriptor,
+					method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+					interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
 			}
 
 			var parameters = ImmutableArray.CreateBuilder<ActorParameterModel>(method.Parameters.Length);
@@ -150,42 +161,63 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 			{
 				if (parameter.RefKind != RefKind.None)
 				{
-					return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
+					return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor,
+						parameter.Locations.FirstOrDefault() ??
+						method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+						interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name,
+						parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 				}
 
 				var parameterTypeDisplay = parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 				var defaultClause = GetDefaultClause(parameter);
-				var isCancellationToken = cancellationTokenType is not null && SymbolEqualityComparer.Default.Equals(parameter.Type, cancellationTokenType);
+				var isCancellationToken = cancellationTokenType is not null &&
+				                          SymbolEqualityComparer.Default.Equals(parameter.Type, cancellationTokenType);
 				if (isCancellationToken)
 				{
 					if (cancellationParameter is not null)
 					{
-						return ContractGenerationResult.Failure(Diagnostic.Create(MultipleCancellationTokensDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name));
+						return ContractGenerationResult.Failure(Diagnostic.Create(MultipleCancellationTokensDescriptor,
+							parameter.Locations.FirstOrDefault() ??
+							method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+							interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+							method.Name));
 					}
 
 					if (parameter.Ordinal != method.Parameters.Length - 1)
 					{
-						return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor, parameter.Locations.FirstOrDefault() ?? method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
+						return ContractGenerationResult.Failure(Diagnostic.Create(UnsupportedParameterDescriptor,
+							parameter.Locations.FirstOrDefault() ??
+							method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+							interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name,
+							parameter.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
 					}
 
-					cancellationParameter = new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name, defaultClause, true, parameter.IsParams);
+					cancellationParameter = new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name,
+						defaultClause, true, parameter.IsParams);
 					continue;
 				}
 
-				parameters.Add(new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name, defaultClause, false, parameter.IsParams));
+				parameters.Add(new ActorParameterModel(parameter, parameterTypeDisplay, parameter.Name, defaultClause,
+					false, parameter.IsParams));
 			}
 
-			if (!TryDetermineReturnModel(context, interfaceSymbol, method, taskType, taskOfTType, valueTaskType, valueTaskOfTType, out var returnModel, out var returnDiagnostic))
+			if (!TryDetermineReturnModel(context, interfaceSymbol, method, taskType, taskOfTType, valueTaskType,
+				    valueTaskOfTType, out var returnModel, out var returnDiagnostic))
 			{
 				return ContractGenerationResult.Failure(returnDiagnostic!);
 			}
 
-			methodModels.Add(new ActorMethodModel(method, parameters.ToImmutable(), cancellationParameter, returnModel, i));
+			methodModels.Add(new ActorMethodModel(method, parameters.ToImmutable(), cancellationParameter, returnModel,
+				i));
 		}
 
-		var @namespace = interfaceSymbol.ContainingNamespace is { IsGlobalNamespace: false } ns ? ns.ToDisplayString() : null;
-		var hintName = interfaceSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat).Replace('<', '_').Replace('>', '_');
-		return ContractGenerationResult.Success(new ActorContractModel(interfaceSymbol, @namespace, serviceName, unique, methodModels.ToImmutable(), hintName));
+		var @namespace = interfaceSymbol.ContainingNamespace is { IsGlobalNamespace: false } ns
+			? ns.ToDisplayString()
+			: null;
+		var hintName = interfaceSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat).Replace('<', '_')
+			.Replace('>', '_');
+		return ContractGenerationResult.Success(new ActorContractModel(interfaceSymbol, @namespace, serviceName, unique,
+			methodModels.ToImmutable(), hintName));
 	}
 
 	private static ImmutableArray<IMethodSymbol> CollectMethods(INamedTypeSymbol interfaceSymbol)
@@ -197,7 +229,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		{
 			foreach (var member in symbol.GetMembers())
 			{
-				if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
+				if (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } method)
 				{
 					var signature = method.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
 					if (seen.Add(signature))
@@ -252,15 +284,18 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 			return true;
 		}
 
-		if (taskOfTType is not null && returnType is INamedTypeSymbol taskOfT && SymbolEqualityComparer.Default.Equals(taskOfT.OriginalDefinition, taskOfTType))
+		if (taskOfTType is not null && returnType is INamedTypeSymbol taskOfT &&
+		    SymbolEqualityComparer.Default.Equals(taskOfT.OriginalDefinition, taskOfTType))
 		{
 			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.TaskOfT, taskOfT.TypeArguments[0]);
 			return true;
 		}
 
-		if (valueTaskOfTType is not null && returnType is INamedTypeSymbol valueTaskOfT && SymbolEqualityComparer.Default.Equals(valueTaskOfT.OriginalDefinition, valueTaskOfTType))
+		if (valueTaskOfTType is not null && returnType is INamedTypeSymbol valueTaskOfT &&
+		    SymbolEqualityComparer.Default.Equals(valueTaskOfT.OriginalDefinition, valueTaskOfTType))
 		{
-			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTaskOfT, valueTaskOfT.TypeArguments[0]);
+			returnModel =
+				new ActorReturnModel(returnDisplay, ActorReturnKind.ValueTaskOfT, valueTaskOfT.TypeArguments[0]);
 			return true;
 		}
 
@@ -270,7 +305,9 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 			return true;
 		}
 
-		diagnostic = Diagnostic.Create(UnsupportedReturnTypeDescriptor, method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(), interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, returnDisplay);
+		diagnostic = Diagnostic.Create(UnsupportedReturnTypeDescriptor,
+			method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+			interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name, returnDisplay);
 		return false;
 	}
 
@@ -293,7 +330,8 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 	private static void WriteContract(SourceWriter writer, ActorContractModel model)
 	{
 		writer.AppendHeader();
-		var generatedNamespace = string.IsNullOrEmpty(model.Namespace) ? "Skynet.Generated" : model.Namespace + ".__Skynet";
+		var generatedNamespace =
+			string.IsNullOrEmpty(model.Namespace) ? "Skynet.Generated" : model.Namespace + ".__Skynet";
 		writer.AppendLine();
 		writer.AppendLine($"namespace {generatedNamespace};");
 		writer.AppendLine();
@@ -322,20 +360,24 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		writer.BeginBlock($"internal static class {model.InterfaceSymbol.Name}Registration");
 		writer.AppendLine("[global::System.Runtime.CompilerServices.ModuleInitializer]");
 		writer.BeginBlock("internal static void Register()");
-		var serviceNameLiteral = model.ServiceName is null ? "null" : SymbolDisplay.FormatLiteral(model.ServiceName, true);
-		writer.AppendLine($"global::Skynet.Core.RpcContractRegistry.Register<{model.InterfaceSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>(");
+		var serviceNameLiteral =
+			model.ServiceName is null ? "null" : SymbolDisplay.FormatLiteral(model.ServiceName, true);
+		writer.AppendLine(
+			$"global::Skynet.Core.RpcContractRegistry.Register<{model.InterfaceSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>(");
 		writer.Indent();
 		writer.AppendLine($"new {model.InterfaceSymbol.Name}Dispatcher(),");
 		writer.AppendLine($"static (actor, options) => new {model.InterfaceSymbol.Name}Proxy(actor, options),");
 		writer.AppendLine($"{serviceNameLiteral},");
 		writer.AppendLine(model.IsUnique ? "true" : "false");
 		writer.Unindent();
-writer.AppendLine(");");
+		writer.AppendLine(");");
 		writer.EndBlock();
 		if (model.ServiceName is not null)
 		{
-			writer.AppendLine($"internal const string ServiceName = {SymbolDisplay.FormatLiteral(model.ServiceName, true)};");
+			writer.AppendLine(
+				$"internal const string ServiceName = {SymbolDisplay.FormatLiteral(model.ServiceName, true)};");
 		}
+
 		writer.AppendLine($"internal const bool IsUnique = {(model.IsUnique ? "true" : "false")};");
 		writer.EndBlock();
 	}
@@ -348,7 +390,8 @@ writer.AppendLine(");");
 		writer.AppendLine("private readonly global::Skynet.Core.ActorRef _actor;");
 		writer.AppendLine("public global::MessagePack.MessagePackSerializerOptions SerializerOptions { get; }");
 		writer.AppendLine();
-		writer.BeginBlock($"public {model.InterfaceSymbol.Name}Proxy(global::Skynet.Core.ActorRef actor, global::MessagePack.MessagePackSerializerOptions? options)");
+		writer.BeginBlock(
+			$"public {model.InterfaceSymbol.Name}Proxy(global::Skynet.Core.ActorRef actor, global::MessagePack.MessagePackSerializerOptions? options)");
 		writer.AppendLine("global::System.ArgumentNullException.ThrowIfNull(actor);");
 		writer.AppendLine("_actor = actor;");
 		writer.AppendLine("SerializerOptions = options ?? global::MessagePack.MessagePackSerializerOptions.Standard;");
@@ -391,21 +434,26 @@ writer.AppendLine(");");
 				writer.AppendLine($"return _actor.CallAsync<object?>(payload, cancellationToken: {cancellationName});");
 				break;
 			case ActorReturnKind.ValueTask:
-				writer.AppendLine($"return new global::System.Threading.Tasks.ValueTask(_actor.CallAsync<object?>(payload, cancellationToken: {cancellationName}));");
+				writer.AppendLine(
+					$"return new global::System.Threading.Tasks.ValueTask(_actor.CallAsync<object?>(payload, cancellationToken: {cancellationName}));");
 				break;
 			case ActorReturnKind.TaskOfT:
 				var taskReturn = method.ReturnModel.InnerTypeDisplay;
-				writer.AppendLine($"return _actor.CallAsync<{taskReturn}>(payload, cancellationToken: {cancellationName});");
+				writer.AppendLine(
+					$"return _actor.CallAsync<{taskReturn}>(payload, cancellationToken: {cancellationName});");
 				break;
 			case ActorReturnKind.ValueTaskOfT:
 				var valueTaskReturn = method.ReturnModel.InnerTypeDisplay;
-				writer.AppendLine($"return new global::System.Threading.Tasks.ValueTask<{valueTaskReturn}>(_actor.CallAsync<{valueTaskReturn}>(payload, cancellationToken: {cancellationName}));");
+				writer.AppendLine(
+					$"return new global::System.Threading.Tasks.ValueTask<{valueTaskReturn}>(_actor.CallAsync<{valueTaskReturn}>(payload, cancellationToken: {cancellationName}));");
 				break;
 			case ActorReturnKind.Sync:
 				var syncReturn = method.ReturnModel.InnerTypeDisplay;
-				writer.AppendLine($"return _actor.CallAsync<{syncReturn}>(payload, cancellationToken: {cancellationName}).GetAwaiter().GetResult();");
+				writer.AppendLine(
+					$"return _actor.CallAsync<{syncReturn}>(payload, cancellationToken: {cancellationName}).GetAwaiter().GetResult();");
 				break;
 		}
+
 		writer.EndBlock();
 	}
 
@@ -419,6 +467,7 @@ writer.AppendLine(");");
 			{
 				builder.Append(", ");
 			}
+
 			first = false;
 			var modifier = parameter.IsParams ? "params " : string.Empty;
 			builder.Append(modifier);
@@ -438,15 +487,20 @@ writer.AppendLine(");");
 	{
 		var interfaceDisplay = model.InterfaceSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 		writer.AppendLine("[global::System.Runtime.CompilerServices.CompilerGenerated]");
-		writer.BeginBlock($"internal sealed class {model.InterfaceSymbol.Name}Dispatcher : global::Skynet.Core.IRpcDispatcher<{interfaceDisplay}>");
-		writer.BeginBlock($"public async global::System.Threading.Tasks.Task<object?> DispatchAsync({interfaceDisplay} target, global::Skynet.Core.MessageEnvelope envelope, global::System.Threading.CancellationToken cancellationToken)");
+		writer.BeginBlock(
+			$"internal sealed class {model.InterfaceSymbol.Name}Dispatcher : global::Skynet.Core.IRpcDispatcher<{interfaceDisplay}>");
+		writer.BeginBlock(
+			$"public async global::System.Threading.Tasks.Task<object?> DispatchAsync({interfaceDisplay} target, global::Skynet.Core.MessageEnvelope envelope, global::System.Threading.CancellationToken cancellationToken)");
 		writer.BeginBlock("switch (envelope.Payload)");
 		foreach (var method in model.Methods)
 		{
-			var caseType = method.PayloadParameters.Length == 0 ? "global::Skynet.Core.RpcMessages.EmptyPayload" : method.RequestTypeName;
+			var caseType = method.PayloadParameters.Length == 0
+				? "global::Skynet.Core.RpcMessages.EmptyPayload"
+				: method.RequestTypeName;
 			writer.BeginBlock($"case {caseType} request:");
 			var callArguments = string.Join(", ", method.PayloadParameters.Select(p => $"request.{p.PropertyName}")
-				.Concat(method.CancellationParameter is not null ? new[] { "cancellationToken" } : Array.Empty<string>()));
+				.Concat(
+					method.CancellationParameter is not null ? new[] { "cancellationToken" } : Array.Empty<string>()));
 			switch (method.ReturnModel.Kind)
 			{
 				case ActorReturnKind.Void:
@@ -462,19 +516,24 @@ writer.AppendLine(");");
 					writer.AppendLine("return null;");
 					break;
 				case ActorReturnKind.TaskOfT:
-					writer.AppendLine($"return await target.{method.Symbol.Name}({callArguments}).ConfigureAwait(false);");
+					writer.AppendLine(
+						$"return await target.{method.Symbol.Name}({callArguments}).ConfigureAwait(false);");
 					break;
 				case ActorReturnKind.ValueTaskOfT:
-					writer.AppendLine($"return await target.{method.Symbol.Name}({callArguments}).ConfigureAwait(false);");
+					writer.AppendLine(
+						$"return await target.{method.Symbol.Name}({callArguments}).ConfigureAwait(false);");
 					break;
 				case ActorReturnKind.Sync:
 					writer.AppendLine($"return target.{method.Symbol.Name}({callArguments});");
 					break;
 			}
+
 			writer.EndBlock();
 		}
+
 		writer.BeginBlock("default:");
-writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupported payload '{{envelope.Payload?.GetType().FullName}}' for contract '{model.InterfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)}'.\");");
+		writer.AppendLine(
+			$"throw new global::Skynet.Core.RpcDispatchException($\"Unsupported payload '{{envelope.Payload?.GetType().FullName}}' for contract '{model.InterfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)}'.\");");
 		writer.EndBlock();
 		writer.EndBlock();
 		writer.EndBlock();
@@ -500,15 +559,16 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 
 		if (method.PayloadParameters.Length > 0)
 		{
-			var constructorParameters = string.Join(", ", method.PayloadParameters.Select(p => $"{p.TypeDisplay} {p.Name}"));
+			var constructorParameters =
+				string.Join(", ", method.PayloadParameters.Select(p => $"{p.TypeDisplay} {p.Name}"));
 			writer.AppendLine();
 			writer.AppendLine("[global::MessagePack.SerializationConstructor]");
 			writer.BeginBlock($"public {method.RequestTypeName}({constructorParameters})");
-			for (var i = 0; i < method.PayloadParameters.Length; i++)
+			foreach (var parameter in method.PayloadParameters)
 			{
-				var parameter = method.PayloadParameters[i];
 				writer.AppendLine($"{parameter.PropertyName} = {parameter.Name};");
 			}
+
 			writer.EndBlock();
 		}
 
@@ -520,7 +580,13 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 		public string InnerTypeDisplay => InnerType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 	}
 
-	private sealed record ActorParameterModel(IParameterSymbol Symbol, string TypeDisplay, string Name, string? DefaultClause, bool IsCancellationToken, bool IsParams)
+	private sealed record ActorParameterModel(
+		IParameterSymbol Symbol,
+		string TypeDisplay,
+		string Name,
+		string? DefaultClause,
+		bool IsCancellationToken,
+		bool IsParams)
 	{
 		public string PropertyName
 		{
@@ -536,28 +602,47 @@ writer.AppendLine($"throw new global::Skynet.Core.RpcDispatchException($\"Unsupp
 				return new string(characters);
 			}
 		}
-
 	}
 
-	private sealed record ActorMethodModel(IMethodSymbol Symbol, ImmutableArray<ActorParameterModel> PayloadParameters, ActorParameterModel? CancellationParameter, ActorReturnModel ReturnModel, int Index)
+	private sealed record ActorMethodModel(
+		IMethodSymbol Symbol,
+		ImmutableArray<ActorParameterModel> PayloadParameters,
+		ActorParameterModel? CancellationParameter,
+		ActorReturnModel ReturnModel,
+		int Index)
 	{
-		public ImmutableArray<ActorParameterModel> AllParameters => CancellationParameter is null ? PayloadParameters : PayloadParameters.Add(CancellationParameter);
-		public string RequestTypeName => PayloadParameters.Length == 0 ? string.Empty : $"{Symbol.ContainingType.Name}_{Symbol.Name}_{Index}Request";
+		public ImmutableArray<ActorParameterModel> AllParameters => CancellationParameter is null
+			? PayloadParameters
+			: PayloadParameters.Add(CancellationParameter);
+
+		public string RequestTypeName => PayloadParameters.Length == 0
+			? string.Empty
+			: $"{Symbol.ContainingType.Name}_{Symbol.Name}_{Index}Request";
 	}
 
-	private sealed record ActorContractModel(INamedTypeSymbol InterfaceSymbol, string? Namespace, string? ServiceName, bool IsUnique, ImmutableArray<ActorMethodModel> Methods, string HintName)
+	private sealed record ActorContractModel(
+		INamedTypeSymbol InterfaceSymbol,
+		string? Namespace,
+		string? ServiceName,
+		bool IsUnique,
+		ImmutableArray<ActorMethodModel> Methods,
+		string HintName)
 	{
 	}
 
-	private readonly record struct ContractGenerationResult(ActorContractModel? Model, ImmutableArray<Diagnostic> Diagnostics)
+	private readonly record struct ContractGenerationResult(
+		ActorContractModel? Model,
+		ImmutableArray<Diagnostic> Diagnostics)
 	{
-		public static ContractGenerationResult Success(ActorContractModel model) => new(model, ImmutableArray<Diagnostic>.Empty);
+		public static ContractGenerationResult Success(ActorContractModel model) =>
+			new(model, ImmutableArray<Diagnostic>.Empty);
 
-		public static ContractGenerationResult Failure(Diagnostic diagnostic) => new(null, ImmutableArray.Create(diagnostic));
+		public static ContractGenerationResult Failure(Diagnostic diagnostic) =>
+			new(null, ImmutableArray.Create(diagnostic));
 	}
 
 	private enum ActorReturnKind
-{
+	{
 		Void,
 		Task,
 		ValueTask,
