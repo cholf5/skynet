@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
@@ -37,12 +36,20 @@ public sealed class GateServer : IAsyncDisposable
 	/// <summary>
 	/// Gets the TCP endpoint the server is listening on.
 	/// </summary>
-	public IPEndPoint? TcpEndpoint { get; private set; }
+	public IPEndPoint? TcpEndpoint
+	{
+		get;
+		private set;
+	}
 
 	/// <summary>
 	/// Gets the public WebSocket URI clients should connect to.
 	/// </summary>
-	public Uri? WebSocketEndpoint { get; private set; }
+	public Uri? WebSocketEndpoint
+	{
+		get;
+		private set;
+	}
 
 	/// <summary>
 	/// Starts the gate server.
@@ -93,7 +100,7 @@ public sealed class GateServer : IAsyncDisposable
 			return;
 		}
 
-		cts.Cancel();
+		await cts.CancelAsync();
 		_tcpListener?.Stop();
 		_tcpListener = null;
 		TcpEndpoint = null;
@@ -115,6 +122,7 @@ public sealed class GateServer : IAsyncDisposable
 		{
 			acceptTasks.Add(_tcpAcceptLoop);
 		}
+
 		if (_webSocketAcceptLoop is not null)
 		{
 			acceptTasks.Add(_webSocketAcceptLoop);
@@ -142,11 +150,14 @@ public sealed class GateServer : IAsyncDisposable
 		{
 			try
 			{
-				await session.Actor.SendAsync(new SessionCloseMessage(SessionCloseReason.ServerShutdown, "Gate server stopping"), cancellationToken).ConfigureAwait(false);
+				await session.Actor
+					.SendAsync(new SessionCloseMessage(SessionCloseReason.ServerShutdown, "Gate server stopping"),
+						cts.Token).ConfigureAwait(false);
 			}
 			catch (Exception ex)
 			{
-				_logger.LogWarning(ex, "Failed to notify session {SessionId} about shutdown.", session.Metadata.SessionId);
+				_logger.LogWarning(ex, "Failed to notify session {SessionId} about shutdown.",
+					session.Metadata.SessionId);
 			}
 		}
 
@@ -175,7 +186,7 @@ public sealed class GateServer : IAsyncDisposable
 	{
 		while (!cancellationToken.IsCancellationRequested)
 		{
-			TcpClient? client = null;
+			TcpClient? client;
 			try
 			{
 				client = await _tcpListener!.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
@@ -198,13 +209,11 @@ public sealed class GateServer : IAsyncDisposable
 				catch (OperationCanceledException)
 				{
 				}
+
 				continue;
 			}
 
-			if (client is not null)
-			{
-				_ = Task.Run(() => HandleTcpClientAsync(client, cancellationToken), CancellationToken.None);
-			}
+			_ = Task.Run(() => HandleTcpClientAsync(client, cancellationToken), CancellationToken.None);
 		}
 	}
 
@@ -224,7 +233,7 @@ public sealed class GateServer : IAsyncDisposable
 			var receiveTask = RunTcpReceiveLoopAsync(runtime, client.GetStream(), sessionToken);
 			var idleTask = MonitorIdleAsync(runtime, sessionToken);
 			await receiveTask.ConfigureAwait(false);
-			sessionCts.Cancel();
+			await sessionCts.CancelAsync();
 			await SafeAwaitAsync(idleTask, sessionId).ConfigureAwait(false);
 		}
 		catch (Exception ex)
@@ -240,7 +249,8 @@ public sealed class GateServer : IAsyncDisposable
 		}
 	}
 
-	private async Task RunTcpReceiveLoopAsync(SessionRuntime runtime, NetworkStream stream, CancellationToken cancellationToken)
+	private async Task RunTcpReceiveLoopAsync(SessionRuntime runtime, NetworkStream stream,
+		CancellationToken cancellationToken)
 	{
 		var header = new byte[4];
 		var maxBytes = _options.MaxMessageBytes;
@@ -271,7 +281,7 @@ public sealed class GateServer : IAsyncDisposable
 				}
 
 				runtime.Connection.MarkActivity();
-				await runtime.Actor.SendAsync(new SessionInboundMessage(payload)).ConfigureAwait(false);
+				await runtime.Actor.SendAsync(new SessionInboundMessage(payload), cancellationToken).ConfigureAwait(false);
 			}
 		}
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -288,12 +298,14 @@ public sealed class GateServer : IAsyncDisposable
 		{
 			try
 			{
-				await runtime.Connection.CloseAsync(closeReason, description, CancellationToken.None).ConfigureAwait(false);
+				await runtime.Connection.CloseAsync(closeReason, description, CancellationToken.None)
+					.ConfigureAwait(false);
 			}
 			catch (Exception ex)
 			{
 				_logger.LogDebug(ex, "Closing TCP session {SessionId} failed.", runtime.Metadata.SessionId);
 			}
+
 			await NotifySessionClosedAsync(runtime, closeReason, description).ConfigureAwait(false);
 		}
 	}
@@ -315,7 +327,8 @@ public sealed class GateServer : IAsyncDisposable
 				var last = runtime.Connection.LastActivity;
 				if (DateTimeOffset.UtcNow - last >= timeout)
 				{
-					await runtime.Actor.SendAsync(new SessionHeartbeatTimeoutMessage(timeout), CancellationToken.None).ConfigureAwait(false);
+					await runtime.Actor.SendAsync(new SessionHeartbeatTimeoutMessage(timeout), CancellationToken.None)
+						.ConfigureAwait(false);
 					break;
 				}
 			}
@@ -329,7 +342,7 @@ public sealed class GateServer : IAsyncDisposable
 	{
 		while (!cancellationToken.IsCancellationRequested)
 		{
-			HttpListenerContext? context = null;
+			HttpListenerContext? context;
 			try
 			{
 				context = await _webSocketListener!.GetContextAsync().ConfigureAwait(false);
@@ -348,11 +361,6 @@ public sealed class GateServer : IAsyncDisposable
 				continue;
 			}
 
-			if (context is null)
-			{
-				continue;
-			}
-
 			if (!context.Request.IsWebSocketRequest)
 			{
 				context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
@@ -360,7 +368,7 @@ public sealed class GateServer : IAsyncDisposable
 				continue;
 			}
 
-			WebSocketContext? wsContext = null;
+			WebSocketContext? wsContext;
 			try
 			{
 				wsContext = await context.AcceptWebSocketAsync(null).ConfigureAwait(false);
@@ -373,11 +381,14 @@ public sealed class GateServer : IAsyncDisposable
 				continue;
 			}
 
-			_ = Task.Run(() => HandleWebSocketAsync(wsContext.WebSocket, context.Request.RemoteEndPoint, cancellationToken), CancellationToken.None);
+			_ = Task.Run(
+				() => HandleWebSocketAsync(wsContext.WebSocket, context.Request.RemoteEndPoint, cancellationToken),
+				CancellationToken.None);
 		}
 	}
 
-	private async Task HandleWebSocketAsync(WebSocket socket, EndPoint? remoteEndPoint, CancellationToken cancellationToken)
+	private async Task HandleWebSocketAsync(WebSocket socket, EndPoint? remoteEndPoint,
+		CancellationToken cancellationToken)
 	{
 		var sessionId = Guid.NewGuid().ToString("N");
 		var connection = new WebSocketSessionConnection(socket);
@@ -393,7 +404,7 @@ public sealed class GateServer : IAsyncDisposable
 			var receiveTask = RunWebSocketReceiveLoopAsync(runtime, socket, sessionToken);
 			var idleTask = MonitorIdleAsync(runtime, sessionToken);
 			await receiveTask.ConfigureAwait(false);
-			sessionCts.Cancel();
+			await sessionCts.CancelAsync();
 			await SafeAwaitAsync(idleTask, sessionId).ConfigureAwait(false);
 		}
 		catch (Exception ex)
@@ -409,7 +420,8 @@ public sealed class GateServer : IAsyncDisposable
 		}
 	}
 
-	private async Task RunWebSocketReceiveLoopAsync(SessionRuntime runtime, WebSocket socket, CancellationToken cancellationToken)
+	private async Task RunWebSocketReceiveLoopAsync(SessionRuntime runtime, WebSocket socket,
+		CancellationToken cancellationToken)
 	{
 		var buffer = new byte[_options.ReceiveBufferBytes];
 		using var accumulator = new MemoryStream();
@@ -428,7 +440,8 @@ public sealed class GateServer : IAsyncDisposable
 					break;
 				}
 
-				if (result.MessageType != WebSocketMessageType.Binary && result.MessageType != WebSocketMessageType.Text)
+				if (result.MessageType != WebSocketMessageType.Binary &&
+				    result.MessageType != WebSocketMessageType.Text)
 				{
 					continue;
 				}
@@ -450,7 +463,7 @@ public sealed class GateServer : IAsyncDisposable
 				{
 					var payload = accumulator.ToArray();
 					accumulator.SetLength(0);
-					await runtime.Actor.SendAsync(new SessionInboundMessage(payload)).ConfigureAwait(false);
+					await runtime.Actor.SendAsync(new SessionInboundMessage(payload), cancellationToken).ConfigureAwait(false);
 				}
 			}
 		}
@@ -474,13 +487,17 @@ public sealed class GateServer : IAsyncDisposable
 			{
 				_logger.LogDebug(ex, "Closing WebSocket session {SessionId} failed.", runtime.Metadata.SessionId);
 			}
+
 			await NotifySessionClosedAsync(runtime, reason, description).ConfigureAwait(false);
 		}
 	}
 
-	private async Task<SessionRuntime> CreateSessionRuntimeAsync(ISessionConnection connection, SessionMetadata metadata, CancellationToken cancellationToken)
+	private async Task<SessionRuntime> CreateSessionRuntimeAsync(ISessionConnection connection,
+		SessionMetadata metadata, CancellationToken cancellationToken)
 	{
-		var actor = await _system.CreateActorAsync(() => new SessionActor(connection, metadata, _options.RouterFactory!), cancellationToken: cancellationToken).ConfigureAwait(false);
+		var actor = await _system
+			.CreateActorAsync(() => new SessionActor(connection, metadata, _options.RouterFactory!),
+				cancellationToken: cancellationToken).ConfigureAwait(false);
 		return new SessionRuntime(metadata, actor, connection);
 	}
 
@@ -507,7 +524,8 @@ public sealed class GateServer : IAsyncDisposable
 		}
 		catch (Exception ex)
 		{
-			_logger.LogDebug(ex, "Failed to notify session actor {SessionId} about closure.", runtime.Metadata.SessionId);
+			_logger.LogDebug(ex, "Failed to notify session actor {SessionId} about closure.",
+				runtime.Metadata.SessionId);
 		}
 	}
 
@@ -521,7 +539,8 @@ public sealed class GateServer : IAsyncDisposable
 		return path.EndsWith('/') ? path : path + "/";
 	}
 
-	private static async Task<bool> ReadExactAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken)
+	private static async Task<bool> ReadExactAsync(NetworkStream stream, Memory<byte> buffer,
+		CancellationToken cancellationToken)
 	{
 		var total = 0;
 		while (total < buffer.Length)
@@ -547,8 +566,19 @@ public sealed class GateServer : IAsyncDisposable
 			Connection = connection;
 		}
 
-		public SessionMetadata Metadata { get; }
-		public ActorRef Actor { get; }
-		public ISessionConnection Connection { get; }
+		public SessionMetadata Metadata
+		{
+			get;
+		}
+
+		public ActorRef Actor
+		{
+			get;
+		}
+
+		public ISessionConnection Connection
+		{
+			get;
+		}
 	}
 }

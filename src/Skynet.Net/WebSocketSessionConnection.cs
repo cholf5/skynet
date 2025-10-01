@@ -1,20 +1,12 @@
 using System.Net.WebSockets;
-using System.Threading;
 
 namespace Skynet.Net;
 
-internal sealed class WebSocketSessionConnection : ISessionConnection
+internal sealed class WebSocketSessionConnection(WebSocket socket) : ISessionConnection
 {
-	private readonly WebSocket _socket;
 	private readonly SemaphoreSlim _sendLock = new(1, 1);
-	private long _lastActivityTicks;
+	private long _lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	private bool _disposed;
-
-	public WebSocketSessionConnection(WebSocket socket)
-	{
-		_socket = socket;
-		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
-	}
 
 	public System.Net.EndPoint? RemoteEndPoint => null;
 
@@ -30,7 +22,7 @@ internal sealed class WebSocketSessionConnection : ISessionConnection
 		await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
 		try
 		{
-			await _socket.SendAsync(payload, WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
+			await socket.SendAsync(payload, WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
 			MarkActivity();
 		}
 		finally
@@ -48,10 +40,11 @@ internal sealed class WebSocketSessionConnection : ISessionConnection
 
 		try
 		{
-			await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, description, cancellationToken).ConfigureAwait(false);
+			await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, description, cancellationToken).ConfigureAwait(false);
 		}
-		catch
+		catch (Exception)
 		{
+			// ignored
 		}
 	}
 
@@ -63,8 +56,8 @@ internal sealed class WebSocketSessionConnection : ISessionConnection
 		}
 
 		_disposed = true;
-		await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "disposed", CancellationToken.None).ConfigureAwait(false);
-		_socket.Dispose();
+		await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "disposed", CancellationToken.None).ConfigureAwait(false);
+		socket.Dispose();
 		_sendLock.Dispose();
 	}
 }

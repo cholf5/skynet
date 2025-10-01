@@ -1,25 +1,16 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
-using System.Threading;
 
 namespace Skynet.Net;
 
-internal sealed class TcpSessionConnection : ISessionConnection
+internal sealed class TcpSessionConnection(TcpClient client) : ISessionConnection
 {
-	private readonly TcpClient _client;
-	private readonly NetworkStream _stream;
+	private readonly NetworkStream _stream = client.GetStream();
 	private readonly SemaphoreSlim _sendLock = new(1, 1);
-	private long _lastActivityTicks;
+	private long _lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	private bool _disposed;
 
-	public TcpSessionConnection(TcpClient client)
-	{
-		_client = client;
-		_stream = client.GetStream();
-		_lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
-	}
-
-	public System.Net.EndPoint? RemoteEndPoint => _client.Client.RemoteEndPoint;
+	public System.Net.EndPoint? RemoteEndPoint => client.Client.RemoteEndPoint;
 
 	public DateTimeOffset LastActivity => new DateTimeOffset(Interlocked.Read(ref _lastActivityTicks), TimeSpan.Zero);
 
@@ -59,14 +50,15 @@ internal sealed class TcpSessionConnection : ISessionConnection
 
 		try
 		{
-			_client.Client.Shutdown(SocketShutdown.Both);
+			client.Client.Shutdown(SocketShutdown.Both);
 		}
-		catch
+		catch (Exception)
 		{
+			// ignored
 		}
 		finally
 		{
-			_client.Close();
+			client.Close();
 		}
 		await Task.CompletedTask.ConfigureAwait(false);
 	}
@@ -80,7 +72,7 @@ internal sealed class TcpSessionConnection : ISessionConnection
 
 		_disposed = true;
 		await _stream.DisposeAsync().ConfigureAwait(false);
-		_client.Dispose();
+		client.Dispose();
 		_sendLock.Dispose();
 	}
 }
