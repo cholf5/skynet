@@ -10,7 +10,7 @@ internal sealed class TcpSessionConnection(TcpClient client) : ISessionConnectio
 	private long _lastActivityTicks = DateTimeOffset.UtcNow.UtcTicks;
 	private bool _disposed;
 
-	public System.Net.EndPoint? RemoteEndPoint => client.Client.RemoteEndPoint;
+	public System.Net.EndPoint? RemoteEndPoint => client.Client is not null ? client.Client.RemoteEndPoint : null;
 
 	public DateTimeOffset LastActivity => new DateTimeOffset(Interlocked.Read(ref _lastActivityTicks), TimeSpan.Zero);
 
