@@ -6,10 +6,8 @@
 - [ ] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 
 ## To Do
-- [ ] [C-4 生成代码禁用同步阻塞](issues/C-4-generator-no-sync-blocking.md) — Owner: AI Agent — Complexity: S
 
 ## In Progress
-- [ ] [C-4 生成代码禁用同步阻塞](issues/C-4-generator-no-sync-blocking.md) — Owner: AI Agent — Complexity: S
 - [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
@@ -22,6 +20,7 @@
 - _None_
 
 ## Done
+- [x] [C-4 生成代码禁用同步阻塞](issues/C-4-generator-no-sync-blocking.md) — Owner: AI Agent — Complexity: S
 - [x] [C-2 Contract ID 映射表：消灭远端 Type.GetType 反射](issues/C-2-contract-id-mapping.md) — Owner: AI Agent — Complexity: M
 - [x] [C-7 RedisClusterRegistry 断线对账与自愈](issues/C-7-redis-registry-reconciliation.md) — Owner: AI Agent — Complexity: M
 - [x] [C-3 TcpTransport 健壮性三硬伤](issues/C-3-tcp-transport-hardening.md) — Owner: AI Agent — Complexity: M
