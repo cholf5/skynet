@@ -139,16 +139,37 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		{
 			connection = await EnsureConnectionAsync(location.NodeId, cancellationToken).ConfigureAwait(false);
 		}
-		catch
+		catch (Exception ex) when (ex is not OperationCanceledException)
 		{
+			// A failed connect (unreachable peer, handshake rejected) must fail-fast the pending
+			// call so the caller's TaskCompletionSource is never left dangling; concurrent calls
+			// each remove their own entry, so batch failures cannot leak.
 			if (pending is not null && _pendingCalls.TryRemove(envelope.MessageId, out var failed))
 			{
-				failed.Response.TrySetException(new IOException("Failed to establish a KCP session to the remote node."));
+				failed.Response.TrySetException(new IOException(
+					$"Failed to establish a KCP session to node '{location.NodeId}'.", ex));
 				failed.Dispose();
 			}
 
 			throw;
 		}
+		catch (OperationCanceledException)
+		{
+			// Cancellation (caller token or connect timeout) must surface as-is instead of being
+			// masked as an IOException. The pending entry is still removed so a connect timeout on
+			// a non-cancelable token cannot leak it; for cancellable tokens the pending's own
+			// cancellation registration usually removes it first.
+			if (pending is not null && _pendingCalls.TryRemove(envelope.MessageId, out var canceled))
+			{
+				canceled.Dispose();
+			}
+
+			throw;
+		}
+
+		// Scope the pending call to the session it will be sent on so a disconnect can fail
+		// exactly the calls routed through the dying session (see OnConnectionClosed).
+		pending?.Connection = connection;
 
 		try
 		{
@@ -394,14 +415,15 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	}
 
 	/// <summary>
-	/// Fails every pending call that was routed to the given node with the supplied exception so
-	/// no <see cref="TaskCompletionSource{TResult}"/> is left dangling after a disconnect.
+	/// Fails every pending call that was routed through the given session with the supplied
+	/// exception so no <see cref="TaskCompletionSource{TResult}"/> is left dangling after a
+	/// disconnect.
 	/// </summary>
-	private void FailPendingCallsForNode(string nodeId, Exception exception)
+	private void FailPendingCallsForNode(Exception exception, KcpConnection connection)
 	{
 		foreach (var pair in _pendingCalls)
 		{
-			if (!string.Equals(pair.Value.NodeId, nodeId, StringComparison.Ordinal))
+			if (!ReferenceEquals(pair.Value.Connection, connection))
 			{
 				continue;
 			}
@@ -424,15 +446,18 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 			return;
 		}
 
-		// Only tear down call state when this session is still the registered link; a replacement
-		// session may already own the node after a reconnect.
-		if (_connections.TryGetValue(nodeId, out var registered) && ReferenceEquals(registered, connection))
-		{
-			_connections.TryRemove(nodeId, out _);
-			// Fail every pending call routed through this session so callers observe the disconnect
-			// instead of hanging until their timeout expires.
-			FailPendingCallsForNode(nodeId, new RemoteConnectionClosedException(nodeId));
-		}
+		// Atomic conditional remove (key + value): only succeeds when the registered session is
+		// still this one, so a concurrently registered replacement can never be removed here.
+		_connections.TryRemove(new KeyValuePair<string, KcpConnection>(nodeId, connection));
+
+		// Fail every pending call that was routed through this session — regardless of whether it
+		// was still the registered link, because its pump has ended and no response can ever
+		// arrive on it. Pending calls carry a Connection reference, so this can never touch
+		// pending calls belonging to a replacement session (and a pending registered after the
+		// removal above is scoped to the replacement, not to this dead session). Pendings that
+		// are still dialing (Connection not yet assigned) are intentionally not failed here; they
+		// are handled by the connect failure path in SendAsync or by the caller's own timeout.
+		FailPendingCallsForNode(new RemoteConnectionClosedException(nodeId), connection);
 	}
 
 	internal async Task HandleIncomingEnvelopeAsync(KcpConnection connection, MessageEnvelope envelope)
@@ -596,6 +621,14 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		/// when the connection to that node dies.
 		/// </summary>
 		internal string NodeId { get; }
+
+		/// <summary>
+		/// Gets or sets the session the call was sent on, assigned by <see cref="KcpTransport.SendAsync"/>
+		/// once the session is established. Used by <see cref="KcpTransport.OnConnectionClosed"/> to
+		/// fail exactly the calls routed through the dying session. <see langword="null"/> while the
+		/// call is still establishing its session.
+		/// </summary>
+		internal KcpConnection? Connection { get; set; }
 
 		internal TaskCompletionSource<object?> Response { get; }
 

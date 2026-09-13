@@ -63,7 +63,9 @@ public static class MessageEnvelopeSerializer
 		"Message envelope wire protocol versions below 3 (legacy string 'PayloadType', or version 2 " +
 		"without the 'IsResponse' direction marker) are no longer supported; this node requires wire " +
 		"protocol version 3. Upgrade every Skynet node in the cluster to a release that uses " +
-		"direction-marker based envelopes.";
+		"direction-marker based envelopes. Note that a version 2 peer does not actively reject " +
+		"version 3 traffic, so in a mixed cluster only the upgraded node fails loudly; verify the " +
+		"whole cluster is upgraded.";
 
 	public static byte[] Serialize(MessageEnvelope envelope, MessagePackSerializerOptions? options = null)
 	{

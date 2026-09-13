@@ -1,10 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Threading.Tasks;
 using FluentAssertions;
 using MessagePack;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
 using Skynet.Core;
@@ -389,12 +389,15 @@ result.Should().Be("echo:pong");
 		await system2.CreateActorAsync(() => new EchoActor(), "echo2",
 			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
 
-		// Warm up both directions serially so each link is established before the lockstep loop;
-		// the aligned counters (one envelope per warm-up call on each side) also stay aligned.
+		// Warm up both directions serially so each link is established before the lockstep loop.
+		// The per-node counters must be aligned after the warm-up (one envelope per side): every
+		// round then produces a request whose MessageId equals the peer's outstanding pending id.
 		(await system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("warmup-1"),
 			TimeSpan.FromSeconds(10))).Should().Be("echo:warmup-1");
 		(await system2.CallAsync<string>(new ActorHandle(1001), new EchoRequest("warmup-2"),
 			TimeSpan.FromSeconds(10))).Should().Be("echo:warmup-2");
+		system1.LastAllocatedMessageId.Should().Be(system2.LastAllocatedMessageId,
+			"aligned counters are what make every lockstep round collide without the fix");
 
 		// Drive both directions in lockstep so the per-node message id counters stay aligned and
 		// every round produces a request whose MessageId equals the peer's outstanding pending id.
@@ -454,7 +457,7 @@ result.Should().Be("echo:pong");
 		await act.Should().ThrowAsync<Exception>().WaitAsync(TimeSpan.FromSeconds(5));
 
 		transport.Should().NotBeNull();
-		GetPendingCallCount(transport!).Should().Be(0,
+		transport!._pendingCalls.Count.Should().Be(0,
 			"a failed connect must fail-fast the pending call instead of leaking it");
 	}
 
@@ -481,11 +484,11 @@ result.Should().Be("echo:pong");
 
 		using var listener = new TcpListener(IPAddress.Loopback, 0);
 		listener.Start();
-		var connectionA = await CreateHandshakenConnectionAsync(transport!, listener);
-		var connectionB = await CreateHandshakenConnectionAsync(transport!, listener);
+		var (connectionA, _) = await CreateHandshakenConnectionAsync(transport!, listener);
+		var (connectionB, _) = await CreateHandshakenConnectionAsync(transport!, listener);
 		try
 		{
-			var connections = GetConnectionDictionary(transport!);
+			var connections = transport!._connections;
 			connections["ghost"] = connectionA;
 
 			// The dying connection itself is still the registered link: its entry is removed.
@@ -540,7 +543,7 @@ result.Should().Be("echo:pong");
 
 		// Wait until node2's read loop has cleaned up the dead connection so the reconnect below
 		// races neither the stale cleanup nor the disposal of a connection still being written to.
-		var connections = GetConnectionDictionary(transport2!);
+		var connections = transport2!._connections;
 		for (var attempt = 0; attempt < 200 && connections.Count > 0; attempt++)
 		{
 			await Task.Delay(25);
@@ -560,6 +563,145 @@ result.Should().Be("echo:pong");
 		result.Should().Be("echo:pong");
 	}
 
+	[Fact]
+	public async Task TcpTransport_ShouldDropStaleResponseWithoutLocalDelivery()
+	{
+		// A response frame whose MessageId has no matching pending call (the caller already timed
+		// out, or the response is bogus) must be dropped with a warning and must never be
+		// delivered to the local actor as if it were a request.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000, ("recorder", 1001)) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		var loggerFactory = new RecordingLoggerFactory();
+
+		TcpTransport? transport = null;
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => transport = new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, loggerFactory));
+		await system.CreateActorAsync(() => new RecordingActor(), "recorder",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+		transport.Should().NotBeNull();
+
+		using var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+		var (connection, serverStream) = await CreateHandshakenConnectionAsync(transport!, listener);
+		// The helper does not start the read loop (other tests drive OnConnectionClosed manually);
+		// this test needs it running so the injected stale frame reaches the transport handler.
+		connection.Start(CancellationToken.None);
+		try
+		{
+			var stale = new SerializedMessageEnvelope
+			{
+				MessageId = 424242,
+				From = 999,
+				To = 1001,
+				CallType = CallType.Call,
+				PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(EchoRequest)),
+				Payload = MessagePackSerializer.Serialize(new EchoRequest("stale")),
+				TraceId = null,
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				TimeToLiveTicks = null,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			};
+			await WriteFrameAsync(serverStream, 0x02, MessagePackSerializer.Serialize(stale));
+
+			await WaitForLogAsync(loggerFactory, "Dropped a stale response", TimeSpan.FromSeconds(5));
+
+			// Give a would-be bogus local delivery ample time to happen, then verify it did not.
+			await Task.Delay(300);
+			var last = await system.CallAsync<string>(new ActorHandle(1001), new GetLastMessage(),
+				TimeSpan.FromSeconds(5));
+			last.Should().BeNull("the stale response must not be delivered to the local actor");
+		}
+		finally
+		{
+			await connection.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task KcpTransport_ShouldDropStaleResponseWithoutLocalDelivery()
+	{
+		// The caller cancels while the remote actor is still processing: the pending call is
+		// removed by the cancellation registration, and the late response that arrives afterwards
+		// has no matching pending call. It must be dropped with a warning instead of being
+		// delivered to a local actor as a request.
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				new StaticClusterNodeConfiguration
+				{
+					NodeId = "node1",
+					Host = "127.0.0.1",
+					Port = GetFreeUdpPort(),
+					HandleOffset = 1000,
+					Services = new Dictionary<string, long>(StringComparer.Ordinal)
+				},
+				new StaticClusterNodeConfiguration
+				{
+					NodeId = "node2",
+					Host = "127.0.0.1",
+					Port = GetFreeUdpPort(),
+					HandleOffset = 2000,
+					Services = new Dictionary<string, long>(StringComparer.Ordinal)
+					{
+						["delayEcho"] = 2001
+					}
+				}
+			}
+		};
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		var loggerFactory = new RecordingLoggerFactory();
+
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, CreateKcpTestOptions(), loggerFactory));
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => new KcpTransport(sys, registry2, CreateKcpTestOptions(),
+				NullLoggerFactory.Instance));
+		await system2.CreateActorAsync(() => new DelayEchoActor(), "delayEcho",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
+
+		using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+		Func<Task> act = async () => await system1.CallAsync<string>(new ActorHandle(2001),
+			new EchoRequest("late"), cancellationToken: cts.Token);
+		await act.Should().ThrowAsync<OperationCanceledException>();
+
+		// The remote actor keeps processing; its response arrives ~500ms in, after the pending
+		// call was already removed by the cancellation above.
+		await WaitForLogAsync(loggerFactory, "Dropped a stale response", TimeSpan.FromSeconds(5));
+		await Task.Delay(300);
+		loggerFactory.Messages.Should().NotContain(
+			message => message.Contains("Failed to deliver message", StringComparison.Ordinal),
+			"the stale response must be dropped instead of being dispatched to a local actor");
+	}
+
+	private static KcpTransportOptions CreateKcpTestOptions()
+	{
+		return new KcpTransportOptions
+		{
+			HeartbeatInterval = TimeSpan.FromSeconds(60),
+			IntervalMilliseconds = 10
+		};
+	}
+
+	private static int GetFreeUdpPort()
+	{
+		using var client = new UdpClient(0, AddressFamily.InterNetwork);
+		return ((IPEndPoint)client.Client.LocalEndPoint!).Port;
+	}
+
 	private static ActorSystem CreateTcpSystem(StaticClusterConfiguration configuration, string nodeId)
 	{
 		var registry = new StaticClusterRegistry(configuration, nodeId);
@@ -571,20 +713,14 @@ result.Should().Be("echo:pong");
 			}, NullLoggerFactory.Instance));
 	}
 
-	private static ConcurrentDictionary<string, TcpTransport.TcpConnection> GetConnectionDictionary(
-		TcpTransport transport)
-	{
-		var field = typeof(TcpTransport).GetField("_connections", BindingFlags.NonPublic | BindingFlags.Instance)
-			?? throw new InvalidOperationException("The _connections field was not found.");
-		return (ConcurrentDictionary<string, TcpTransport.TcpConnection>)field.GetValue(transport)!;
-	}
-
 	/// <summary>
 	/// Creates an outbound transport connection over a raw loopback listener and completes the
-	/// cluster handshake so the remote node id is known. The read loop is not started.
+	/// cluster handshake so the remote node id is known. The read loop is left stopped; call
+	/// <see cref="TcpTransport.TcpConnection.Start"/> when the connection must consume frames.
+	/// Returns the server-side stream so tests can inject raw frames into the transport.
 	/// </summary>
-	private static async Task<TcpTransport.TcpConnection> CreateHandshakenConnectionAsync(
-		TcpTransport transport, TcpListener listener)
+	private static async Task<(TcpTransport.TcpConnection Connection, NetworkStream ServerStream)>
+		CreateHandshakenConnectionAsync(TcpTransport transport, TcpListener listener)
 	{
 		var client = new TcpClient();
 		await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
@@ -599,15 +735,76 @@ result.Should().Be("echo:pong");
 		await WriteFrameAsync(stream, 0x01,
 			MessagePackSerializer.Serialize(new TcpTransport.ClusterHandshake("ghost")));
 		await handshake;
-		return connection;
+		return (connection, stream);
 	}
 
-	private static int GetPendingCallCount(TcpTransport transport)
+	private static async Task WaitForLogAsync(RecordingLoggerFactory factory, string fragment, TimeSpan timeout)
 	{
-		var field = typeof(TcpTransport).GetField("_pendingCalls", BindingFlags.NonPublic | BindingFlags.Instance)
-			?? throw new InvalidOperationException("The _pendingCalls field was not found.");
-		var pendingCalls = (System.Collections.IDictionary)field.GetValue(transport)!;
-		return pendingCalls.Count;
+		var deadline = DateTime.UtcNow + timeout;
+		while (DateTime.UtcNow < deadline)
+		{
+			lock (factory.LockObject)
+			{
+				if (factory.Messages.Any(message => message.Contains(fragment, StringComparison.Ordinal)))
+				{
+					return;
+				}
+			}
+
+			await Task.Delay(50);
+		}
+
+		lock (factory.LockObject)
+		{
+			factory.Messages.Should().Contain(message => message.Contains(fragment, StringComparison.Ordinal),
+				$"expected a log entry containing '{fragment}' within {timeout.TotalSeconds}s");
+		}
+	}
+
+	private sealed class RecordingLoggerFactory : ILoggerFactory
+	{
+		internal object LockObject { get; } = new();
+
+		internal List<string> Messages { get; } = new();
+
+		public ILogger CreateLogger(string categoryName) => new RecordingLogger(this);
+
+		public void AddProvider(ILoggerProvider provider)
+		{
+		}
+
+		public void Dispose()
+		{
+		}
+
+		private sealed class RecordingLogger : ILogger
+		{
+			private readonly RecordingLoggerFactory _factory;
+
+			public RecordingLogger(RecordingLoggerFactory factory)
+			{
+				_factory = factory;
+			}
+
+			public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+			public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+
+			public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+				Func<TState, Exception?, string> formatter)
+			{
+				if (logLevel < LogLevel.Information)
+				{
+					return;
+				}
+
+				var message = formatter(state, exception);
+				lock (_factory.LockObject)
+				{
+					_factory.Messages.Add(message);
+				}
+			}
+		}
 	}
 
 	private static StaticClusterNodeConfiguration CreateNodeConfiguration(string nodeId, int port,
@@ -705,6 +902,16 @@ result.Should().Be("echo:pong");
 			// The delay honors cancellation so the actor does not stall system disposal.
 			await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
 			return "slow:done";
+		}
+	}
+
+	private sealed class DelayEchoActor : Actor
+	{
+		protected override async Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+		{
+			// Short handler delay so a late response reliably arrives after the caller canceled.
+			await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+			return envelope.Payload is EchoRequest request ? $"delayed:{request.Message}" : null;
 		}
 	}
 
