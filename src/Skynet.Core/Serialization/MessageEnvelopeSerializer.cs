@@ -39,20 +39,31 @@ public sealed class SerializedMessageEnvelope
 
 	[Key(9)]
 	public int Version { get; init; }
+
+	/// <summary>
+	/// Direction marker: <see langword="true"/> when this envelope is a response produced by
+	/// <see cref="MessageEnvelope.WithResponse"/>. Receivers must only match pending remote calls
+	/// against response envelopes; request frames never complete a pending call.
+	/// </summary>
+	[Key(10)]
+	public bool IsResponse { get; init; }
 }
 
 public static class MessageEnvelopeSerializer
 {
 	/// <summary>
 	/// Wire protocol version that replaced the string <c>PayloadType</c> (AssemblyQualifiedName)
-	/// field with the int <c>PayloadContractId</c> field. Envelopes below this version are rejected.
+	/// field with the int <c>PayloadContractId</c> field. Version 3 added the <c>IsResponse</c>
+	/// direction marker that prevents cross-node MessageId collisions between concurrent requests
+	/// and pending-call responses. Envelopes below this version are rejected.
 	/// </summary>
-	public const int WireVersion = 2;
+	public const int WireVersion = 3;
 
 	private const string LegacyVersionMessage =
-		"Message envelope wire protocol version 1 (string 'PayloadType' / AssemblyQualifiedName) is no longer " +
-		"supported; this node requires wire protocol version 2 (int 'PayloadContractId'). " +
-		"Upgrade every Skynet node in the cluster to a release that uses contract-id based envelopes.";
+		"Message envelope wire protocol versions below 3 (legacy string 'PayloadType', or version 2 " +
+		"without the 'IsResponse' direction marker) are no longer supported; this node requires wire " +
+		"protocol version 3. Upgrade every Skynet node in the cluster to a release that uses " +
+		"direction-marker based envelopes.";
 
 	public static byte[] Serialize(MessageEnvelope envelope, MessagePackSerializerOptions? options = null)
 	{
@@ -86,7 +97,8 @@ public static class MessageEnvelopeSerializer
 			TraceId = envelope.TraceId,
 			Timestamp = envelope.Timestamp.UtcTicks,
 			TimeToLiveTicks = envelope.TimeToLive?.Ticks,
-			Version = envelope.Version
+			Version = envelope.Version,
+			IsResponse = envelope.IsResponse
 		};
 
 		return MessagePackSerializer.Serialize(dto, options);
@@ -143,7 +155,8 @@ public static class MessageEnvelopeSerializer
 			dto.TraceId,
 			timestamp,
 			ttl,
-			dto.Version);
+			dto.Version,
+			dto.IsResponse);
 	}
 
 	/// <summary>

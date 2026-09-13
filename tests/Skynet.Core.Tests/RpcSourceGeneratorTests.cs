@@ -135,7 +135,7 @@ public sealed class RpcSourceGeneratorTests
 		Func<MessageEnvelope> act = () => MessageEnvelopeSerializer.Deserialize(bytes);
 
 		act.Should().Throw<NotSupportedException>()
-			.WithMessage("*wire protocol version 1*no longer supported*PayloadContractId*");
+			.WithMessage("*wire protocol versions below 3*no longer supported*wire protocol version 3*");
 	}
 
 	[Fact]

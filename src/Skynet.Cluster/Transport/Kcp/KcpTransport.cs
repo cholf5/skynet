@@ -437,25 +437,38 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 
 	internal async Task HandleIncomingEnvelopeAsync(KcpConnection connection, MessageEnvelope envelope)
 	{
-		if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
+		// Only response envelopes may complete a pending call. A request frame from the peer
+		// carries a MessageId from the peer's own counter, which can collide with the ids of
+		// this node's outstanding calls; matching it would corrupt the pending call's result
+		// and silently swallow the request.
+		if (envelope.IsResponse)
 		{
-			using (pending)
+			if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
 			{
-				switch (envelope.Payload)
+				using (pending)
 				{
-					case KcpRemoteCallFault { IsCancellation: true }:
-						pending.Response.TrySetCanceled();
-						break;
-					case KcpRemoteCallFault fault:
-						pending.Response.TrySetException(
-							new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
-						break;
-					default:
-						pending.Response.TrySetResult(envelope.Payload);
-						break;
+					switch (envelope.Payload)
+					{
+						case KcpRemoteCallFault { IsCancellation: true }:
+							pending.Response.TrySetCanceled();
+							break;
+						case KcpRemoteCallFault fault:
+							pending.Response.TrySetException(
+								new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
+							break;
+						default:
+							pending.Response.TrySetResult(envelope.Payload);
+							break;
+					}
 				}
+
+				return;
 			}
 
+			// A response with no pending call (the caller already timed out or the session was
+			// replaced) has nowhere to go; never deliver it to a local actor as a request.
+			_logger.LogWarning("Dropped a stale response for message {MessageId} from node {NodeId}.",
+				envelope.MessageId, connection.RemoteNodeId);
 			return;
 		}
 

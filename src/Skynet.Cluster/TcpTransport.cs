@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
 using MessagePack;
@@ -110,7 +111,26 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			}
 		}
 
-		var connection = await EnsureConnectionAsync(location.NodeId, cancellationToken).ConfigureAwait(false);
+		TcpConnection connection;
+		try
+		{
+			connection = await EnsureConnectionAsync(location.NodeId, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception ex)
+		{
+			// A failed connect (refused, timed out, handshake rejected) must fail-fast the pending
+			// call so the caller's TaskCompletionSource is never left dangling; concurrent calls
+			// each remove their own entry, so batch failures cannot leak.
+			if (pending is not null && _pendingCalls.TryRemove(envelope.MessageId, out var failed))
+			{
+				failed.Response.TrySetException(new IOException(
+					$"Failed to establish a connection to node '{location.NodeId}'.", ex));
+				failed.Dispose();
+			}
+
+			throw;
+		}
+
 		try
 		{
 			await connection.SendEnvelopeAsync(envelope, cancellationToken).ConfigureAwait(false);
@@ -203,6 +223,31 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		finally
 		{
 			gate.Release();
+		}
+	}
+
+	/// <summary>
+	/// Cleans up after a connection's read loop has ended. Shared state (the registered connection
+	/// for the remote node and every pending call routed through it) is only torn down when this
+	/// connection is still the registered link: a replacement connection may already own the node
+	/// after a reconnect, and removing it (or failing its pending calls) would be an ABA error.
+	/// </summary>
+	internal void OnConnectionClosed(TcpConnection connection)
+	{
+		if (!connection.TryGetRemoteNodeId(out var nodeId))
+		{
+			return;
+		}
+
+		if (_connections.TryGetValue(nodeId, out var registered) && ReferenceEquals(registered, connection))
+		{
+			// Atomic conditional remove: only succeeds when the registered connection is still
+			// this one, so a concurrently registered replacement can never be removed here.
+			((ICollection<KeyValuePair<string, TcpConnection>>)_connections)
+				.Remove(new KeyValuePair<string, TcpConnection>(nodeId, connection));
+			// Fail every pending call routed through this connection so callers observe
+			// the disconnect instead of hanging until their timeout expires.
+			FailPendingCallsForNode(nodeId, new RemoteConnectionClosedException(nodeId));
 		}
 	}
 
@@ -303,25 +348,38 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 	private async Task HandleIncomingEnvelopeAsync(TcpConnection connection, MessageEnvelope envelope)
 	{
-		if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
+		// Only response envelopes may complete a pending call. A request frame from the peer
+		// carries a MessageId from the peer's own counter, which can collide with the ids of
+		// this node's outstanding calls; matching it would corrupt the pending call's result
+		// and silently swallow the request.
+		if (envelope.IsResponse)
 		{
-			using (pending)
+			if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
 			{
-				switch (envelope.Payload)
+				using (pending)
 				{
-					case RemoteCallFault { IsCancellation: true }:
-						pending.Response.TrySetCanceled();
-						break;
-					case RemoteCallFault fault:
-						pending.Response.TrySetException(
-							new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
-						break;
-					default:
-						pending.Response.TrySetResult(envelope.Payload);
-						break;
+					switch (envelope.Payload)
+					{
+						case RemoteCallFault { IsCancellation: true }:
+							pending.Response.TrySetCanceled();
+							break;
+						case RemoteCallFault fault:
+							pending.Response.TrySetException(
+								new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
+							break;
+						default:
+							pending.Response.TrySetResult(envelope.Payload);
+							break;
+					}
 				}
+
+				return;
 			}
 
+			// A response with no pending call (the caller already timed out or the connection was
+			// replaced) has nowhere to go; never deliver it to a local actor as a request.
+			_logger.LogWarning("Dropped a stale response for message {MessageId} from node {NodeId}.",
+				envelope.MessageId, connection.RemoteNodeId);
 			return;
 		}
 
@@ -479,8 +537,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		[property: Key(1)] string ExceptionType,
 		[property: Key(2)] string? Message);
 
-	private sealed class TcpConnection : IAsyncDisposable
-	{
+		internal sealed class TcpConnection : IAsyncDisposable
+		{
 		private readonly TcpTransport _transport;
 		private readonly TcpClient _client;
 		private readonly NetworkStream _stream;
@@ -515,6 +573,15 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		internal string RemoteNodeId =>
 			_remoteNodeId ?? throw new InvalidOperationException("Handshake not completed.");
+
+		/// <summary>
+		/// Gets a value indicating whether the handshake completed and the remote node id is known.
+		/// </summary>
+		internal bool TryGetRemoteNodeId([MaybeNullWhen(false)] out string nodeId)
+		{
+			nodeId = _remoteNodeId;
+			return nodeId is not null;
+		}
 
 		internal bool IsAlive => !_cts.IsCancellationRequested && _client.Connected;
 
@@ -597,15 +664,9 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			}
 			finally
 			{
-				if (_remoteNodeId is not null)
-				{
-					_transport._connections.TryRemove(_remoteNodeId, out _);
-					// Fail every pending call routed through this connection so callers observe
-					// the disconnect instead of hanging until their timeout expires.
-					_transport.FailPendingCallsForNode(_remoteNodeId,
-						new RemoteConnectionClosedException(_remoteNodeId));
-				}
-
+				// Conditional cleanup: a replacement connection may already be registered for this
+				// node (reconnect race), so only shared state owned by this connection is released.
+				_transport.OnConnectionClosed(this);
 				DisposeCore();
 			}
 		}

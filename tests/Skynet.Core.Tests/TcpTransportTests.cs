@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Threading.Tasks;
 using FluentAssertions;
 using MessagePack;
@@ -349,6 +351,263 @@ result.Should().Be("echo:pong");
 		response.PayloadContractId.Should().Be(PayloadContractRegistry.ComputeContractId("System.String"));
 		PayloadContractRegistry.TryResolve(response.PayloadContractId, out var responsePayloadType).Should().BeTrue();
 		MessagePackSerializer.Deserialize(responsePayloadType!, response.Payload).Should().Be("echo:pong");
+	}
+
+	[Fact]
+	public async Task CallAsync_BidirectionalConcurrentCalls_ShouldNotCrossMatchPendingCalls()
+	{
+		// Both nodes allocate message ids from their own counters starting at the same value, so a
+		// request from node2 carries the same MessageId as a pending call node1 has outstanding
+		// towards node2. Pending matching must therefore never treat a request frame as a response.
+		var (port1, port2) = (GetFreePort(), GetFreePort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				CreateNodeConfiguration("node1", port1, 1000, ("echo", 1001)),
+				CreateNodeConfiguration("node2", port2, 2000, ("echo2", 2001))
+			}
+		};
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new TcpTransport(sys, registry1, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await system1.CreateActorAsync(() => new EchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => new TcpTransport(sys, registry2, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await system2.CreateActorAsync(() => new EchoActor(), "echo2",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
+
+		// Warm up both directions serially so each link is established before the lockstep loop;
+		// the aligned counters (one envelope per warm-up call on each side) also stay aligned.
+		(await system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("warmup-1"),
+			TimeSpan.FromSeconds(10))).Should().Be("echo:warmup-1");
+		(await system2.CallAsync<string>(new ActorHandle(1001), new EchoRequest("warmup-2"),
+			TimeSpan.FromSeconds(10))).Should().Be("echo:warmup-2");
+
+		// Drive both directions in lockstep so the per-node message id counters stay aligned and
+		// every round produces a request whose MessageId equals the peer's outstanding pending id.
+		const int rounds = 100;
+		var errors = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+		for (var i = 0; i < rounds; i++)
+		{
+			var callNode2 = system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest($"n1-{i}"),
+				TimeSpan.FromSeconds(10));
+			var callNode1 = system2.CallAsync<string>(new ActorHandle(1001), new EchoRequest($"n2-{i}"),
+				TimeSpan.FromSeconds(10));
+			try
+			{
+				var results = await Task.WhenAll(callNode2, callNode1);
+				results[0].Should().Be($"echo:n1-{i}");
+				results[1].Should().Be($"echo:n2-{i}");
+			}
+			catch (Exception ex)
+			{
+				errors.Add(ex);
+				break; // One cross-match is proof enough; skip the remaining rounds.
+			}
+		}
+
+		errors.Should().BeEmpty("cross-matched pending calls corrupt results and swallow requests");
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldFailFastAndDrainPendingCallsWhenConnectFails()
+	{
+		// node2's descriptor points at a port with no listener: the connect attempt is refused.
+		// The service entry is required so the target handle resolves to node2 at all.
+		var (port1, unreachablePort) = (GetFreePort(), GetFreePort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				CreateNodeConfiguration("node1", port1, 1000),
+				CreateNodeConfiguration("node2", unreachablePort, 2000, ("echo", 2001))
+			}
+		};
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+
+		TcpTransport? transport = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport = new TcpTransport(sys, registry1, new TcpTransportOptions
+			{
+				ConnectTimeout = TimeSpan.FromSeconds(2),
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+
+		Func<Task> act = async () => await system1.CallAsync<string>(new ActorHandle(2001),
+			new EchoRequest("ping"), TimeSpan.FromSeconds(10));
+
+		// The call must fail within the connect timeout instead of hanging forever.
+		await act.Should().ThrowAsync<Exception>().WaitAsync(TimeSpan.FromSeconds(5));
+
+		transport.Should().NotBeNull();
+		GetPendingCallCount(transport!).Should().Be(0,
+			"a failed connect must fail-fast the pending call instead of leaking it");
+	}
+
+	[Fact]
+	public async Task OnConnectionClosed_ShouldOnlyRemoveItsOwnRegistration()
+	{
+		// Deterministic white-box test for the ABA defect: the cleanup of a dead connection must
+		// never remove a replacement connection that was registered concurrently (reconnect race).
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+
+		TcpTransport? transport = null;
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => transport = new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		transport.Should().NotBeNull();
+
+		using var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+		var connectionA = await CreateHandshakenConnectionAsync(transport!, listener);
+		var connectionB = await CreateHandshakenConnectionAsync(transport!, listener);
+		try
+		{
+			var connections = GetConnectionDictionary(transport!);
+			connections["ghost"] = connectionA;
+
+			// The dying connection itself is still the registered link: its entry is removed.
+			transport!.OnConnectionClosed(connectionA);
+			connections.ContainsKey("ghost").Should().BeFalse();
+
+			// A replacement connection has already been registered when the stale cleanup of the
+			// old connection finally runs: the ABA guard must keep the replacement registered.
+			connections["ghost"] = connectionB;
+			transport.OnConnectionClosed(connectionA);
+			connections["ghost"].Should().BeSameAs(connectionB);
+
+			transport.OnConnectionClosed(connectionB);
+			connections.ContainsKey("ghost").Should().BeFalse();
+		}
+		finally
+		{
+			await connectionA.DisposeAsync();
+			await connectionB.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldReconnectAfterRemoteNodeRestarts()
+	{
+		var (port1, port2) = (GetFreePort(), GetFreePort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				CreateNodeConfiguration("node1", port1, 1000, ("echo", 1001)),
+				CreateNodeConfiguration("node2", port2, 2000)
+			}
+		};
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		TcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new TcpTransport(sys, registry2, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await using (var system1 = CreateTcpSystem(configuration, "node1"))
+		{
+			await system1.CreateActorAsync(() => new EchoActor(), "echo",
+				new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+			var remote = system2.GetByName("echo");
+			(await remote.CallAsync<string>(new EchoRequest("ping"), TimeSpan.FromSeconds(5)))
+				.Should().Be("echo:pong");
+		}
+
+		// Wait until node2's read loop has cleaned up the dead connection so the reconnect below
+		// races neither the stale cleanup nor the disposal of a connection still being written to.
+		var connections = GetConnectionDictionary(transport2!);
+		for (var attempt = 0; attempt < 200 && connections.Count > 0; attempt++)
+		{
+			await Task.Delay(25);
+		}
+
+		connections.Should().BeEmpty("the dead connection's cleanup must have completed");
+
+		// node1 is gone; node2's registered connection is (or soon becomes) dead. Restarting node1
+		// on the same port and calling again must establish a fresh connection instead of reusing
+		// or corrupting the state of the dead one.
+		await using var restartedSystem1 = CreateTcpSystem(configuration, "node1");
+		await restartedSystem1.CreateActorAsync(() => new EchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		var result = await system2.GetByName("echo").CallAsync<string>(new EchoRequest("ping"),
+			TimeSpan.FromSeconds(10));
+		result.Should().Be("echo:pong");
+	}
+
+	private static ActorSystem CreateTcpSystem(StaticClusterConfiguration configuration, string nodeId)
+	{
+		var registry = new StaticClusterRegistry(configuration, nodeId);
+		return new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+	}
+
+	private static ConcurrentDictionary<string, TcpTransport.TcpConnection> GetConnectionDictionary(
+		TcpTransport transport)
+	{
+		var field = typeof(TcpTransport).GetField("_connections", BindingFlags.NonPublic | BindingFlags.Instance)
+			?? throw new InvalidOperationException("The _connections field was not found.");
+		return (ConcurrentDictionary<string, TcpTransport.TcpConnection>)field.GetValue(transport)!;
+	}
+
+	/// <summary>
+	/// Creates an outbound transport connection over a raw loopback listener and completes the
+	/// cluster handshake so the remote node id is known. The read loop is not started.
+	/// </summary>
+	private static async Task<TcpTransport.TcpConnection> CreateHandshakenConnectionAsync(
+		TcpTransport transport, TcpListener listener)
+	{
+		var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+		var connection = new TcpTransport.TcpConnection(transport, client, outbound: true,
+			NullLogger.Instance, TimeSpan.Zero, TimeSpan.Zero, 0, MessagePackSerializerOptions.Standard);
+		var handshake = connection.InitializeAsync("node1", CancellationToken.None);
+
+		var server = await listener.AcceptTcpClientAsync();
+		var stream = server.GetStream();
+		var (type, _) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+		type.Should().Be(0x01);
+		await WriteFrameAsync(stream, 0x01,
+			MessagePackSerializer.Serialize(new TcpTransport.ClusterHandshake("ghost")));
+		await handshake;
+		return connection;
+	}
+
+	private static int GetPendingCallCount(TcpTransport transport)
+	{
+		var field = typeof(TcpTransport).GetField("_pendingCalls", BindingFlags.NonPublic | BindingFlags.Instance)
+			?? throw new InvalidOperationException("The _pendingCalls field was not found.");
+		var pendingCalls = (System.Collections.IDictionary)field.GetValue(transport)!;
+		return pendingCalls.Count;
 	}
 
 	private static StaticClusterNodeConfiguration CreateNodeConfiguration(string nodeId, int port,
