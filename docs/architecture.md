@@ -83,6 +83,22 @@ Skynet 遵循“三层一体”的设计：
   入队失败异常通过 `OnlyOnFaulted` 续接观察，不会产生未观察 Task 异常。
 - 生成代码中不再出现任何 `.GetAwaiter().GetResult()` 同步阻塞形态。
 
+### 调用语义与环检测（mailbox 严格串行）
+
+- mailbox 严格串行：`ActorHost` 逐条 `await ProcessMessageAsync`，handler 内 `await CallAsync`
+  会挂起本 actor 的 mailbox 直到被调方返回。这保证了 actor 内部状态的单线程访问。
+- **进程内 call 图必须无环**。环状调用（A call B、B 又 call A，或 actor call 自己）会永久
+  死锁所有参与的 mailbox；框架在 call 发起的瞬间检测环并抛出
+  `ActorCallCycleException`（消息含完整环路径，如 `Actor call cycle detected: 1 → 2 → 1`），
+  而不是让调用悬挂。详见 [ADR 0001](adr/0001-actor-reentrancy-semantics.md)。
+- 实现要点：调用链（`ActorCallChain`）由 `ActorHost.ProcessMessageAsync` 在处理消息时建立，
+  经 `MessageEnvelope.CallChain` 跨 actor 边界传播（仅进程内，不参与 wire 序列化），在
+  `ActorSystem.CallAsync`（直接调用、`ActorRef.CallAsync` 与生成 RPC proxy 的共同入口）
+  单点检测。`SendAsync` 是 fire-and-forget，不产生阻塞边，不进链、不检测——需要回调形态
+  的协作时用 send 而不是环状 call。
+- 已知边界：跨节点的环（远端 actor 回 call 本节点挂起中的 actor）暂不检测；
+  `OnStartAsync` 中发起的调用亦在链建立之前。
+
 ### Transport 抽象
 - `ITransport` 描述基础投递能力，包含 `SendAsync`、`CallAsync`、`DisposeAsync` 等方法。
 - `InProcTransport` 面向单进程开发，直接将消息投递到目标 Actor 的信箱中。

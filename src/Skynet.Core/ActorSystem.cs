@@ -255,6 +255,17 @@ public sealed class ActorSystem : IAsyncDisposable
 		ArgumentNullException.ThrowIfNull(payload);
 		ThrowIfDisposed();
 
+		// Mailboxes are strictly serial: awaiting a call suspends this actor's mailbox until the
+		// callee responds. If the target is already suspended somewhere on this causal call stack,
+		// the call can never complete — fail loudly with the full cycle path instead of hanging.
+		// This is the single interception point: direct calls, ActorRef.CallAsync and generated
+		// RPC proxies all funnel through this method.
+		var callChain = ActorCallContext.CurrentChain;
+		if (callChain is not null && callChain.Contains(to))
+		{
+			throw new ActorCallCycleException($"Actor call cycle detected: {callChain.FormatPath(to, ResolveActorName)}");
+		}
+
 		var response = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
 		CancellationTokenSource? timeoutSource = null;
 		CancellationToken effectiveToken = cancellationToken;
@@ -350,6 +361,10 @@ public sealed class ActorSystem : IAsyncDisposable
 	internal MessageEnvelope CreateEnvelope(ActorHandle to, ActorHandle from, CallType callType, object payload)	{
 		var messageId = Interlocked.Increment(ref _nextMessageId);
 		var traceId = TraceContext.CurrentTraceId ?? TraceContext.EnsureTraceId();
+		// Only calls create blocking edges in the call graph, so only calls propagate the chain.
+		// A fire-and-forget send breaks the causal chain: the sender's handler is not suspended
+		// waiting for the receiver.
+		var callChain = callType == CallType.Call ? ActorCallContext.CurrentChain : null;
 		return new MessageEnvelope(
 			messageId,
 			from,
@@ -359,7 +374,13 @@ public sealed class ActorSystem : IAsyncDisposable
 			traceId,
 			DateTimeOffset.UtcNow,
 			TimeToLive: null,
-			Serialization.MessageEnvelopeSerializer.WireVersion);
+			Serialization.MessageEnvelopeSerializer.WireVersion,
+			CallChain: callChain);
+	}
+
+	private string? ResolveActorName(ActorHandle handle)
+	{
+		return _handleToName.TryGetValue(handle.Value, out var name) ? name : null;
 	}
 
 	private async ValueTask<bool> RemoveActorAsync(ActorHandle handle, bool notifyRegistry = true)
