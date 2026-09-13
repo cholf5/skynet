@@ -20,6 +20,7 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly bool _ownsTransport;
 	private readonly long _handleOffset;
 	private readonly IClusterRegistry? _clusterRegistry;
+	private readonly ActorTimerScheduler _timers;
 	private long _nextHandle;
 	private long _nextMessageId;
 	private bool _disposed;
@@ -40,6 +41,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		_handleOffset = options?.HandleOffset ?? 0;
 		_clusterRegistry = options?.ClusterRegistry;
 		Metrics = options?.MetricsCollector ?? new ActorMetricsCollector();
+		_timers = new ActorTimerScheduler(this);
 
 		if (transport is not null)
 		{
@@ -58,6 +60,11 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// Gets the metrics collector used by the actor system.
 	/// </summary>
 	public ActorMetricsCollector Metrics { get; }
+
+	/// <summary>
+	/// Gets the timer scheduler that delivers due timer callbacks to actor mailboxes.
+	/// </summary>
+	internal ActorTimerScheduler Timers => _timers;
 
 	/// <summary>
 	/// Creates a new actor instance and registers it with the system.
@@ -334,8 +341,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		return _transport.SendAsync(envelope, response, cancellationToken);
 	}
 
-	private MessageEnvelope CreateEnvelope(ActorHandle to, ActorHandle from, CallType callType, object payload)
-	{
+	internal MessageEnvelope CreateEnvelope(ActorHandle to, ActorHandle from, CallType callType, object payload)	{
 		var messageId = Interlocked.Increment(ref _nextMessageId);
 		var traceId = TraceContext.CurrentTraceId ?? TraceContext.EnsureTraceId();
 		return new MessageEnvelope(
@@ -367,6 +373,8 @@ public sealed class ActorSystem : IAsyncDisposable
 		}
 
 		Metrics.UnregisterActor(handle);
+		// Cancel the actor's pending timers before tearing down its host so due ticks are never dispatched.
+		_timers.CancelByActor(handle);
 		await host.DisposeAsync().ConfigureAwait(false);
 		return true;
 	}
@@ -390,6 +398,10 @@ public sealed class ActorSystem : IAsyncDisposable
 		{
 			await RemoveActorAsync(new ActorHandle(handleValue)).ConfigureAwait(false);
 		}
+
+		// Stop the timer scheduler after all actors are gone; the background thread is a
+		// background thread, so this join cannot keep the process alive.
+		_timers.Dispose();
 
 		if (_ownsTransport)
 		{
