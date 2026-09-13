@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Threading.Channels;
 using MessagePack;
 using Microsoft.Extensions.Logging;
 using Skynet.Core;
@@ -41,9 +42,10 @@ internal sealed class KcpConnection : IAsyncDisposable
 	private readonly CancellationTokenSource _cts = new();
 	private readonly TaskCompletionSource _handshakeCompleted =
 		new(TaskCreationOptions.RunContinuationsAsynchronously);
+	private readonly TimeSpan _deadNodeGracePeriod;
 	private long _lastReceivedTickCount = Environment.TickCount64;
 	private string? _remoteNodeId;
-	private bool _disposed;
+	private int _disposed;
 
 	internal KcpConnection(KcpTransport transport, uint conversationId, IPEndPoint remoteEndPoint,
 		bool outbound, ILogger logger, KcpTransportOptions options)
@@ -54,6 +56,7 @@ internal sealed class KcpConnection : IAsyncDisposable
 		RemoteEndPoint = remoteEndPoint;
 		Outbound = outbound;
 		Options = options;
+		_deadNodeGracePeriod = ResolveDeadNodeGracePeriod(options);
 		var interval = TimeSpan.FromMilliseconds(Math.Max(1, options.IntervalMilliseconds));
 		_pump = new KcpConnectionPump(
 			new KcpSession(
@@ -87,6 +90,23 @@ internal sealed class KcpConnection : IAsyncDisposable
 	internal bool Outbound { get; }
 
 	private KcpTransportOptions Options { get; }
+
+	/// <summary>
+	/// Mirrors <see cref="TcpTransport.ResolveDeadNodeGracePeriod"/>: an explicitly configured
+	/// grace period wins; otherwise it defaults to three times the heartbeat interval so dead-peer
+	/// detection is active by default instead of requiring explicit configuration.
+	/// </summary>
+	private static TimeSpan ResolveDeadNodeGracePeriod(KcpTransportOptions options)
+	{
+		if (options.DeadNodeGracePeriod > TimeSpan.Zero)
+		{
+			return options.DeadNodeGracePeriod;
+		}
+
+		return options.HeartbeatInterval > TimeSpan.Zero
+			? TimeSpan.FromTicks(3 * options.HeartbeatInterval.Ticks)
+			: TimeSpan.Zero;
+	}
 
 	internal string RemoteNodeId =>
 		_remoteNodeId ?? throw new InvalidOperationException("Handshake not completed.");
@@ -129,9 +149,41 @@ internal sealed class KcpConnection : IAsyncDisposable
 	}
 
 	/// <summary>Starts the pump for an inbound (server-side) session without awaiting a handshake.</summary>
+	/// <remarks>
+	/// Also arms the inbound handshake watchdog: an inbound session has no
+	/// <see cref="KcpTransportOptions.ConnectTimeout"/> of its own, so without a deadline an
+	/// unauthenticated peer (or a garbage datagram) could pin a pump, two tasks, and a timer
+	/// forever without ever completing the handshake.
+	/// </remarks>
 	internal void Start()
 	{
 		_pump.Start();
+		if (Options.InboundHandshakeTimeout > TimeSpan.Zero)
+		{
+			_ = Task.Run(() => InboundHandshakeWatchdogAsync(_cts.Token));
+		}
+	}
+
+	private async Task InboundHandshakeWatchdogAsync(CancellationToken cancellationToken)
+	{
+		try
+		{
+			await Task.Delay(Options.InboundHandshakeTimeout, cancellationToken).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			return;
+		}
+
+		if (_handshakeCompleted.Task.IsCompleted)
+		{
+			return;
+		}
+
+		_logger.LogWarning(
+			"Inbound KCP session from {EndPoint} did not complete its handshake within {Timeout}; closing the session.",
+			RemoteEndPoint, Options.InboundHandshakeTimeout);
+		await DisposeAsync().ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -228,9 +280,11 @@ internal sealed class KcpConnection : IAsyncDisposable
 		}
 
 		_remoteNodeId = handshake.NodeId;
+		// Signal handshake completion for both directions: the outbound ConnectAsync awaits the
+		// task, and the inbound handshake watchdog uses it to see that a handshake arrived.
+		_handshakeCompleted.TrySetResult();
 		if (Outbound)
 		{
-			_handshakeCompleted.TrySetResult();
 			return;
 		}
 
@@ -255,11 +309,11 @@ internal sealed class KcpConnection : IAsyncDisposable
 
 				var silentFor = TimeSpan.FromMilliseconds(Environment.TickCount64 -
 					Interlocked.Read(ref _lastReceivedTickCount));
-				if (Options.DeadNodeGracePeriod > TimeSpan.Zero && silentFor > Options.DeadNodeGracePeriod)
+				if (_deadNodeGracePeriod > TimeSpan.Zero && silentFor > _deadNodeGracePeriod)
 				{
 					_logger.LogWarning(
 						"No frames received from node {NodeId} for {SilentFor} (grace period {GracePeriod}); closing the KCP session as suspected dead.",
-						_remoteNodeId, silentFor, Options.DeadNodeGracePeriod);
+						_remoteNodeId, silentFor, _deadNodeGracePeriod);
 					_ = DisposeAsync();
 					return;
 				}
@@ -270,16 +324,28 @@ internal sealed class KcpConnection : IAsyncDisposable
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
 		}
+		catch (Exception ex) when (ex is ChannelClosedException or ObjectDisposedException)
+		{
+			// The pump (or the transport) was torn down concurrently — for example the pump faulted
+			// after a dead link while this loop was still sending heartbeats. The frame has nowhere
+			// to go and the teardown already handles cleanup, so end the loop quietly.
+			_logger.LogDebug(ex,
+				"KCP heartbeat loop for node {NodeId} ended because the session was closed concurrently.",
+				_remoteNodeId);
+		}
 	}
 
 	public async ValueTask DisposeAsync()
 	{
-		if (_disposed)
+		// Atomic check-and-set: concurrent Dispose calls (e.g. a heartbeat-driven close racing the
+		// transport teardown) must let exactly one caller run the cancellation/teardown sequence.
+		// A plain bool check-then-act let a second caller reach CancelAsync/Dispose on an already
+		// disposed CTS and escape with an ObjectDisposedException.
+		if (Interlocked.Exchange(ref _disposed, 1) != 0)
 		{
 			return;
 		}
 
-		_disposed = true;
 		if (!_cts.IsCancellationRequested)
 		{
 			await _cts.CancelAsync().ConfigureAwait(false);

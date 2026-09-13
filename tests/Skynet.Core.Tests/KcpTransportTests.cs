@@ -1,9 +1,12 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using FluentAssertions;
 using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
+using Skynet.Cluster.Transport.Kcp;
 using Skynet.Core;
 using Skynet.Core.Serialization;
 using Xunit;
@@ -80,6 +83,279 @@ public sealed class KcpTransportTests
 		info.Source.Should().Be("kcp-rpc");
 	}
 
+	[Fact]
+	public async Task CallAsync_ShouldFailPendingCallWhenSilentPeerExceedsDefaultGracePeriod()
+	{
+		// DeadNodeGracePeriod is left at its default (Zero), which must resolve to three times the
+		// heartbeat interval — dead-peer detection has to work without explicit configuration.
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2, ("slow", 1001));
+
+		// node1 never sends a heartbeat: after the handshake reply it stays completely silent.
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.Zero,
+				IntervalMilliseconds = 10
+			}, NullLoggerFactory.Instance));
+		await system1.CreateActorAsync(() => new KcpSlowActor(), "slow",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, new KcpTransportOptions
+			{
+				// 3 x 250ms = 750ms effective grace period under the default Zero configuration.
+				HeartbeatInterval = TimeSpan.FromMilliseconds(250),
+				IntervalMilliseconds = 10
+			}, NullLoggerFactory.Instance));
+
+		var remote = system2.GetByName("slow");
+		var callTask = remote.CallAsync<string>(new KcpEchoRequest("ping"), TimeSpan.FromSeconds(30));
+
+		// The silent peer never answers, so node2 must detect the half-open session after the
+		// default grace period and fail the pending call without waiting for the 30s timeout.
+		Func<Task> act = async () => await callTask.WaitAsync(TimeSpan.FromSeconds(10));
+		await act.Should().ThrowAsync<RemoteConnectionClosedException>()
+			.Where(exception => exception.NodeId == "node1");
+
+		await WaitForConditionAsync(() => transport2!._sessionsByConv.IsEmpty, TimeSpan.FromSeconds(5),
+			"the dead session must be removed from the session table");
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldFailPendingCallAndReapSessionWhenKcpDeadLinkDetected()
+	{
+		// kcp2k enters its terminal dead-link state (state == -1) when retransmitted segments are
+		// never acknowledged. The pump must detect that on its tick and tear the session down
+		// through the regular connection-closed path, fail-fasting the pending call.
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2, ("slow", 1002));
+
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60),
+				IntervalMilliseconds = 10
+			}, NullLoggerFactory.Instance));
+		await system1.CreateActorAsync(() => new KcpEchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+		await system1.CreateActorAsync(() => new KcpSlowActor(), "slow",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1002) });
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60),
+				IntervalMilliseconds = 10
+			}, NullLoggerFactory.Instance));
+
+		// Warm up so the session exists, then park a pending call on the slow actor.
+		var echo = system2.GetByName("echo");
+		(await echo.CallAsync<string>(new KcpEchoRequest("warmup"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:warmup");
+
+		var callTask = system2.GetByName("slow").CallAsync<string>(new KcpEchoRequest("ping"),
+			TimeSpan.FromSeconds(30));
+		await Task.Delay(200); // Let the pending call register and its envelope go out.
+
+		// White-box: force the vendored KCP state machine into its dead-link terminal state.
+		ForceKcpDeadLink(transport2!._connections["node1"]);
+
+		Func<Task> act = async () => await callTask.WaitAsync(TimeSpan.FromSeconds(5));
+		await act.Should().ThrowAsync<RemoteConnectionClosedException>()
+			.Where(exception => exception.NodeId == "node1");
+
+		await WaitForConditionAsync(() => transport2._sessionsByConv.IsEmpty, TimeSpan.FromSeconds(5),
+			"the dead-link session must be removed from the session table");
+	}
+
+	[Fact]
+	public async Task InboundSessions_ShouldEnforceLimitWithoutEvictingExistingSessions()
+	{
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		KcpTransport? transport1 = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport1 = new KcpTransport(sys, registry1, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60),
+				InboundHandshakeTimeout = TimeSpan.FromSeconds(60),
+				MaxInboundSessions = 3
+			}, NullLoggerFactory.Instance));
+
+		using var source = new UdpClient();
+		// The first unknown conversation fills one of the three slots...
+		await SendJunkDatagramAsync(source, port1, 9001);
+		await WaitForConditionAsync(() => transport1!._sessionsByConv.ContainsKey(9001), TimeSpan.FromSeconds(5),
+			"the first unknown conversation must create a session");
+
+		// ...then the flood fills the remaining slots and is capped afterwards.
+		for (var conversationId = 9002u; conversationId <= 9010u; conversationId++)
+		{
+			await SendJunkDatagramAsync(source, port1, conversationId);
+		}
+
+		await WaitForConditionAsync(() => transport1!._sessionsByConv.Count >= 3, TimeSpan.FromSeconds(5),
+			"the limit must allow exactly MaxInboundSessions sessions");
+		await Task.Delay(300);
+		transport1!._sessionsByConv.Count.Should().Be(3, "sessions beyond the limit must be dropped");
+		transport1._sessionsByConv.ContainsKey(9001).Should().BeTrue(
+			"the limit must never evict an already accepted session");
+	}
+
+	[Fact]
+	public async Task InboundSessions_ShouldReapSessionThatNeverCompletesHandshake()
+	{
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		KcpTransport? transport1 = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport1 = new KcpTransport(sys, registry1, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60),
+				InboundHandshakeTimeout = TimeSpan.FromMilliseconds(400)
+			}, NullLoggerFactory.Instance));
+
+		using var source = new UdpClient();
+		await SendJunkDatagramAsync(source, port1, 8001);
+		await WaitForConditionAsync(() => transport1!._sessionsByConv.ContainsKey(8001), TimeSpan.FromSeconds(5),
+			"an unknown conversation id must create an inbound session");
+
+		// No handshake ever arrives: the watchdog must reclaim the session.
+		await WaitForConditionAsync(() => transport1!._sessionsByConv.IsEmpty, TimeSpan.FromSeconds(5),
+			"the handshake-less inbound session must be reaped after the timeout");
+	}
+
+	[Fact]
+	public async Task RouteDatagram_ShouldNotResurrectRetiredConversation()
+	{
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+		await system1.CreateActorAsync(() => new KcpEchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+
+		// Establish the session, then close it locally: its conversation id becomes retired.
+		var remote = system2.GetByName("echo");
+		(await remote.CallAsync<string>(new KcpEchoRequest("warmup"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:warmup");
+		var connection = transport2!._connections["node1"];
+		await connection.DisposeAsync();
+		await WaitForConditionAsync(() => transport2._sessionsByConv.IsEmpty, TimeSpan.FromSeconds(5),
+			"the disposed session must be removed before the resurrection attempt");
+
+		// A late datagram for the retired conversation (in the real world: the peer's handshake
+		// reply that outlived the outbound handshake timeout) must not recreate the session.
+		using var source = new UdpClient();
+		var retiredConversationId = GetConversationId(connection);
+		await SendJunkDatagramAsync(source, port2, retiredConversationId);
+		await Task.Delay(TimeSpan.FromSeconds(1));
+		transport2._sessionsByConv.ContainsKey(retiredConversationId).Should().BeFalse(
+			"a datagram for a retired conversation must not resurrect the closed session");
+
+		// A datagram for an unknown, non-retired conversation must still create a session,
+		// proving the drop above is the retirement rule and not a broken inbound path.
+		await SendJunkDatagramAsync(source, port2, 777777);
+		await WaitForConditionAsync(() => transport2._sessionsByConv.ContainsKey(777777),
+			TimeSpan.FromSeconds(5), "unknown non-retired conversations must still create sessions");
+	}
+
+	[Fact]
+	public async Task DisposeAsync_ShouldTolerateConcurrentDisposal()
+	{
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		KcpTransport? transport = null;
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => transport = new KcpTransport(sys, registry, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+
+		// Concurrent Dispose calls raced a plain bool guard and could escape with an
+		// ObjectDisposedException from a double CancelAsync; the Interlocked guard must keep every
+		// concurrent caller quiet. Repeated rounds widen the race window coverage.
+		for (var round = 0; round < 20; round++)
+		{
+			var connection = new KcpConnection(transport!, unchecked((uint)round + 500000),
+				new IPEndPoint(IPAddress.Loopback, port1), outbound: true,
+				NullLogger.Instance, new KcpTransportOptions());
+			var tasks = Enumerable.Range(0, 8)
+				.Select(_ => Task.Run(() => connection.DisposeAsync().AsTask()));
+			await Task.WhenAll(tasks);
+			connection.IsAlive.Should().BeFalse();
+		}
+	}
+
+	private static void ForceKcpDeadLink(KcpConnection connection)
+	{
+		var pump = (KcpConnectionPump)typeof(KcpConnection)
+			.GetField("_pump", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(connection)!;
+		var session = (KcpSession)typeof(KcpConnectionPump)
+			.GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(pump)!;
+		var kcp = (global::kcp2k.Kcp)typeof(KcpSession)
+			.GetField("_kcp", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+		kcp.state = -1;
+	}
+
+	private static uint GetConversationId(KcpConnection connection)
+	{
+		return connection.ConversationId;
+	}
+
+	/// <summary>
+	/// Sends a datagram whose payload is deliberately invalid at the KCP level (shorter than a KCP
+	/// segment header): the transport still routes it by conversation id, but the KCP state machine
+	/// rejects it without faulting, so a session created from it simply idles.
+	/// </summary>
+	private static async Task SendJunkDatagramAsync(UdpClient client, int port, uint conversationId)
+	{
+		var datagram = new byte[12];
+		BinaryPrimitives.WriteUInt32LittleEndian(datagram, conversationId);
+		await client.SendAsync(datagram, new IPEndPoint(IPAddress.Loopback, port));
+	}
+
+	private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout, string because)
+	{
+		var deadline = DateTime.UtcNow + timeout;
+		while (DateTime.UtcNow < deadline)
+		{
+			if (condition())
+			{
+				return;
+			}
+
+			await Task.Delay(25);
+		}
+
+		condition().Should().BeTrue(because);
+	}
+
 	private static KcpTransportOptions CreateTestOptions()
 	{
 		return new KcpTransportOptions
@@ -98,8 +374,20 @@ public sealed class KcpTransportTests
 				NullLoggerFactory.Instance));
 	}
 
-	private static StaticClusterConfiguration CreateConfiguration(int port1, int port2)
+	private static StaticClusterConfiguration CreateConfiguration(int port1, int port2,
+		params (string Service, long Handle)[] extraNode1Services)
 	{
+		var node1Services = new Dictionary<string, long>(StringComparer.Ordinal)
+		{
+			["echo"] = 1001,
+			["recorder"] = 1001,
+			["echoRpc"] = 1001
+		};
+		foreach (var (service, handle) in extraNode1Services)
+		{
+			node1Services[service] = handle;
+		}
+
 		return new StaticClusterConfiguration
 		{
 			Nodes = new[]
@@ -110,12 +398,7 @@ public sealed class KcpTransportTests
 					Host = "127.0.0.1",
 					Port = port1,
 					HandleOffset = 1000,
-					Services = new Dictionary<string, long>(StringComparer.Ordinal)
-					{
-						["echo"] = 1001,
-						["recorder"] = 1001,
-						["echoRpc"] = 1001
-					}
+					Services = node1Services
 				},
 				new StaticClusterNodeConfiguration
 				{
@@ -164,6 +447,17 @@ public sealed class KcpTransportTests
 				default:
 					return Task.FromResult<object?>(null);
 			}
+		}
+	}
+
+	private sealed class KcpSlowActor : Actor
+	{
+		protected override async Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+		{
+			// Simulates a long-running handler: the response never arrives during the tests.
+			// The delay honors cancellation so the actor does not stall system disposal.
+			await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+			return "slow:done";
 		}
 	}
 

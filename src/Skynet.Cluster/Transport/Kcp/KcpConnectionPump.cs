@@ -139,6 +139,15 @@ internal sealed class KcpConnectionPump : IAsyncDisposable
 						break;
 					case PumpOperationType.Tick:
 						_session.Update(UncheckedCurrentMilliseconds());
+						if (_session.IsDeadLink)
+						{
+							// kcp2k set its terminal dead-link state: the peer stopped acknowledging
+							// retransmitted segments. Escalate through the regular fault path, which
+							// cancels the pump and tears the owning connection down (failing its
+							// pending calls) instead of retransmitting into the void forever.
+							throw new IOException(
+								"The KCP session detected a dead link: unacknowledged segments exceeded their retransmission budget.");
+						}
 						break;
 				}
 

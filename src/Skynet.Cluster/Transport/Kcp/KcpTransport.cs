@@ -44,16 +44,29 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 
 	private const int ConversationHeaderLength = KcpWire.ConversationHeaderLength;
 
+	/// <summary>
+	/// How long the conversation id of a closed session is remembered as retired. Late datagrams
+	/// for a retired conversation are dropped instead of creating a new inbound session, so a peer
+	/// reply that arrives after the local session already died (e.g. a handshake response that
+	/// outlived the outbound <see cref="KcpTransportOptions.ConnectTimeout"/>) cannot resurrect the
+	/// dead session under an attacker-controlled source endpoint.
+	/// </summary>
+	private static readonly TimeSpan RetiredConversationRetention = TimeSpan.FromMinutes(5);
+
 	private readonly ActorSystem _system;
 	private readonly IClusterRegistry _registry;
 	private readonly KcpTransportOptions _options;
 	private readonly ILogger<KcpTransport> _logger;
 	private readonly UdpClient _udp;
 	private readonly CancellationTokenSource _cts = new();
-	private readonly ConcurrentDictionary<uint, KcpConnection> _sessionsByConv = new();
-	private readonly ConcurrentDictionary<string, KcpConnection> _connections = new(StringComparer.Ordinal);
+	// Internal for white-box tests (mirrors TcpTransport._connections/_pendingCalls).
+	internal readonly ConcurrentDictionary<uint, KcpConnection> _sessionsByConv = new();
+	internal readonly ConcurrentDictionary<string, KcpConnection> _connections = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectionLocks = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
+	/// <summary>Retired conversation ids mapped to the raw tick count at which the entry expires.</summary>
+	private readonly ConcurrentDictionary<uint, long> _retiredConversations = new();
+	private int _inboundSessionCount;
 	private readonly MessagePackSerializerOptions _serializerOptions;
 	private Task? _receiveLoop;
 	private bool _disposed;
@@ -270,15 +283,57 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 			return;
 		}
 
+		if (IsRetiredConversation(conversationId))
+		{
+			_logger.LogWarning(
+				"Dropped a datagram for retired conversation {ConversationId} from {EndPoint}: that session was already closed and must not be resurrected.",
+				conversationId, result.RemoteEndPoint);
+			return;
+		}
+
 		CreateInboundSession(conversationId, result.RemoteEndPoint, payload.ToArray());
+	}
+
+	/// <summary>
+	/// Checks whether the conversation id belongs to a session that was already closed. Expired
+	/// entries are removed on access so the bookkeeping cannot grow without bound.
+	/// </summary>
+	private bool IsRetiredConversation(uint conversationId)
+	{
+		if (!_retiredConversations.TryGetValue(conversationId, out var expiresAtTickCount))
+		{
+			return false;
+		}
+
+		if (Environment.TickCount64 < expiresAtTickCount)
+		{
+			return true;
+		}
+
+		_retiredConversations.TryRemove(conversationId, out _);
+		return false;
 	}
 
 	private void CreateInboundSession(uint conversationId, IPEndPoint remoteEndPoint, byte[] firstPayload)
 	{
+		// Bound the session table before paying for a pump + tasks + timer: unknown conversation
+		// ids arrive unauthenticated, so a forged source could otherwise create sessions that are
+		// only ever reclaimed by timeouts. Existing sessions are never evicted by the limit.
+		if (_options.MaxInboundSessions > 0 &&
+			Interlocked.Increment(ref _inboundSessionCount) > _options.MaxInboundSessions)
+		{
+			Interlocked.Decrement(ref _inboundSessionCount);
+			_logger.LogWarning(
+				"Rejected a new inbound KCP conversation {ConversationId} from {EndPoint}: the inbound session limit of {MaxInboundSessions} is reached.",
+				conversationId, remoteEndPoint, _options.MaxInboundSessions);
+			return;
+		}
+
 		var connection = new KcpConnection(this, conversationId, remoteEndPoint, outbound: false, _logger, _options);
 		if (!_sessionsByConv.TryAdd(conversationId, connection))
 		{
 			// A concurrent datagram created the session first; feed this payload into it.
+			Interlocked.Decrement(ref _inboundSessionCount);
 			_ = _sessionsByConv[conversationId].HandleDatagramAsync(firstPayload, CancellationToken.None);
 			return;
 		}
@@ -356,7 +411,8 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		{
 			Random.Shared.NextBytes(buffer);
 			var conversationId = BitConverter.ToUInt32(buffer);
-			if (conversationId != 0 && !_sessionsByConv.ContainsKey(conversationId))
+			if (conversationId != 0 && !_sessionsByConv.ContainsKey(conversationId) &&
+				!_retiredConversations.ContainsKey(conversationId))
 			{
 				return conversationId;
 			}
@@ -441,6 +497,19 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	internal void OnConnectionClosed(KcpConnection connection)
 	{
 		_sessionsByConv.TryRemove(connection.ConversationId, out _);
+		if (!connection.Outbound)
+		{
+			// Mirror the reservation made by CreateInboundSession so the inbound session limit keeps
+			// reflecting only live sessions. Fires exactly once per connection (guarded by the
+			// connection's own dispose guard).
+			Interlocked.Decrement(ref _inboundSessionCount);
+		}
+
+		// Retire the conversation id so late datagrams for this dead session cannot resurrect it
+		// as a fresh inbound session (the session-resurrection hole).
+		_retiredConversations[connection.ConversationId] =
+			Environment.TickCount64 + RetiredConversationRetention.Ticks;
+
 		if (_disposed || !connection.TryGetRemoteNodeId(out var nodeId))
 		{
 			return;
@@ -654,6 +723,23 @@ public sealed class KcpTransportOptions
 	/// Gets or sets the timeout for outbound KCP handshakes.
 	/// </summary>
 	public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+	/// <summary>
+	/// Gets or sets the maximum period an inbound session may exist without completing its
+	/// handshake before it is closed. Outbound sessions are bounded by <see cref="ConnectTimeout"/>;
+	/// without this deadline an inbound session created by an unauthenticated datagram could pin
+	/// its pump, tasks, and timer forever when the peer never finishes the handshake.
+	/// Defaults to 10 seconds. Set to <see cref="TimeSpan.Zero"/> to disable the watchdog.
+	/// </summary>
+	public TimeSpan InboundHandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+	/// <summary>
+	/// Gets or sets the maximum number of concurrently maintained inbound sessions. Datagrams that
+	/// would create an inbound session beyond this limit are dropped (existing sessions are never
+	/// evicted), which keeps unauthenticated peers from growing the session table without bound.
+	/// Defaults to 256. Set to zero or a negative value to disable the limit.
+	/// </summary>
+	public int MaxInboundSessions { get; init; } = 256;
 
 	/// <summary>
 	/// Gets or sets the heartbeat interval used to keep sessions alive and detect dead peers.
