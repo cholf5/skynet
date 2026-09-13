@@ -55,7 +55,7 @@ actor，按从最外层调用者到当前执行者排序"。它只有 call 边�
 2. **跨 actor 边界（envelope 传播）**：`ActorSystem.CallAsync` 发起调用时，把当前链写入
    `MessageEnvelope.CallChain`。本地投递时目标 handler 在目标 actor 的 host 循环里执行，
    已经是不同的 `AsyncLocal` 上下文——目标 actor 的链由它自己的 ProcessMessageAsync 从
-   envelope 重建并追加自己。因此链精确刻画了"谁在等谁"。
+   envelope 重建并追加自己。因此链精确刻画了"因果调用栈上的挂起（等待）关系"。
 
 **检测点**：`ActorSystem.CallAsync` 是唯一拦截位置——直接调用、`ActorRef.CallAsync`、
 以及 Source Generator 生成的 RPC proxy（走 `ActorRef.CallAsync`）全部汇聚于此。发起
@@ -64,8 +64,25 @@ actor，按从最外层调用者到当前执行者排序"。它只有 call 边�
 
 **作用域与边界**：
 
+- **保证的准确表述**：本机制保证"**发起时**已能从因果调用栈识别的环 100% 响亮失败"；
+  它**不覆盖**"收尾边是排队中（尚未出队）的 call"构成的 wait-for 死锁——那条 call 还没
+  发起，initiation-time 检测原理上看不到。两个反例：
+  1. *三方互等*：A 的 handler `await CallAsync(B)`（call 已在 B 的 mailbox 排队，B 正在
+     处理另一条消息 M）；M 的 handler `await CallAsync(A)`。M 的链 = [B] 不含 A，放行。
+     结果 A 等 B 的响应、B 被 M 占住、M 等 A 的响应，永久死锁且零报错，而静态 call 图
+     A→B→A 已成环。
+  2. *纯 call 并行环*：A 的 handler `await Task.WhenAll(CallAsync(B), CallAsync(C))`；
+     B 调 C、C 调 B。若 C 先处理 A 直发的消息（链 [A,C]），其 call B 发起时链不含 B，
+     放行后 B↔C 互等死锁（若 C 恰好先处理 B 的消息则会被检测到，行为取决于出队顺序）。
+  要覆盖此类死锁需 wait-for 图分析（记录"谁在等谁"的全局挂起图并在投递/入队时查环）或
+  响应超时兜底（如为 `CallAsync` 提供默认超时），二者均为**backlog**，不在本决策范围。
+  用户侧的务实缓解：对可能互调的长链显式传 `timeout`。
+- **误报方向边界**：handler 内 fire-and-forget 分离的异步任务（如 `_ = Task.Run(...)`）
+  经 ExecutionContext 继承发起时的链；该任务中回调发起链上某个 actor 的 call 会被误判
+  为环。此形态罕见且报错响亮（路径完整可定位），规避方式是分离任务不直接 call 发起链
+  上的 actor。
 - 每条并发调用链持有独立的 `AsyncLocal` 上下文，互不串扰；同一 actor handler 内
-  `Task.WhenAll` 的多个并行分支共享同一链前缀，各分支追加各自目标，互不误报。
+  `Task.WhenAll` 的多个并行分支共享同一链前缀，各分支追加各自目标，发起时互不误报。
 - 链是**进程内**语义：`MessageEnvelope.CallChain` 不参与 wire 序列化（不改 wire 协议版本），
   远端节点收到消息后由自己的 ProcessMessageAsync 从空链建立自己的链。
   **跨节点环（节点 1 的 A call 节点 2 的 B，B 又 call 节点 1 的 A）不在本决策的检测范围内**，

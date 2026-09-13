@@ -88,9 +88,12 @@ Skynet 遵循“三层一体”的设计：
 - mailbox 严格串行：`ActorHost` 逐条 `await ProcessMessageAsync`，handler 内 `await CallAsync`
   会挂起本 actor 的 mailbox 直到被调方返回。这保证了 actor 内部状态的单线程访问。
 - **进程内 call 图必须无环**。环状调用（A call B、B 又 call A，或 actor call 自己）会永久
-  死锁所有参与的 mailbox；框架在 call 发起的瞬间检测环并抛出
-  `ActorCallCycleException`（消息含完整环路径，如 `Actor call cycle detected: 1 → 2 → 1`），
-  而不是让调用悬挂。详见 [ADR 0001](adr/0001-actor-reentrancy-semantics.md)。
+  死锁所有参与的 mailbox。框架保证：发起时即可从因果调用栈识别的环，会在 call 发起的
+  瞬间抛出 `ActorCallCycleException`（消息含完整环路径，如
+  `Actor call cycle detected: 1 → 2 → 1`），而不是让调用悬挂。**不覆盖**"收尾边仍在目标
+  mailbox 排队"构成的 wait-for 死锁（如 A call B 已排队、B 当前消息又 call A）——此类
+  死锁零报错，需 wait-for 图分析或超时兜底，已列 backlog；对可能互调的 call 建议显式传
+  `timeout`。详见 [ADR 0001](adr/0001-actor-reentrancy-semantics.md)。
 - 实现要点：调用链（`ActorCallChain`）由 `ActorHost.ProcessMessageAsync` 在处理消息时建立，
   经 `MessageEnvelope.CallChain` 跨 actor 边界传播（仅进程内，不参与 wire 序列化），在
   `ActorSystem.CallAsync`（直接调用、`ActorRef.CallAsync` 与生成 RPC proxy 的共同入口）
