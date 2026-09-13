@@ -1,11 +1,17 @@
 # Kanban Board
 
 ## Backlog
+- [ ] [D-5 Gate 加密：重放防护与方向密钥分离](issues/D-5-gate-crypto-replay-hardening.md) — Owner: AI Agent — Complexity: M
+- [ ] [D-6 contract id 边界加固](issues/D-6-contract-id-edge-hardening.md) — Owner: AI Agent — Complexity: S
+- [ ] [D-7 P2 零散修复批](issues/D-7-p2-batch-fixes.md) — Owner: AI Agent — Complexity: S
+- [ ] [D-8 KCP 传输拆分为独立工程 Skynet.Transport.Kcp](issues/D-8-split-kcp-transport-project.md) — Owner: AI Agent — Complexity: S
 
 ## To Do
+- [ ] [D-3 KcpTransport 加固对齐（默认死链检测 + 入站会话治理）](issues/D-3-kcp-transport-hardening.md) — Owner: AI Agent — Complexity: M
+- [ ] [D-4 Actor 重入语义决策（await CallAsync 挂起 mailbox 循环）](issues/D-4-actor-reentrancy-semantics.md) — Owner: AI Agent — Complexity: M
 
 ## In Progress
-- [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## In Review
 - _None_
@@ -17,6 +23,9 @@
 - _None_
 
 ## Done
+- [x] [D-2 TcpTransport 并发遗留三连（ABA 删除 / 连接失败 fail-fast / MessageId 撞车）](issues/D-2-tcp-transport-concurrency-leftovers.md) — Owner: AI Agent — Complexity: M
+- [x] [D-1 Gate 客户端发送互斥与接收帧上限](issues/D-1-gate-client-send-mutex.md) — Owner: AI Agent — Complexity: S
+- [x] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 - [x] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 - [x] [C-6 移植 Gate 加密握手（RSA token，现代化改造）](issues/C-6-gate-encryption-handshake.md) — Owner: AI Agent — Complexity: M
 - [x] [C-5 移植 Gate 出站连接池](issues/C-5-outbound-gate-connection-pool.md) — Owner: AI Agent — Complexity: M
