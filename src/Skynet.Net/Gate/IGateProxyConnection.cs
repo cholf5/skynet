@@ -19,6 +19,13 @@ public interface IGateProxyConnection : IAsyncDisposable
 	/// </summary>
 	event EventHandler<GateFrameReceivedEventArgs>? FrameReceived;
 
+	/// <summary>
+	/// Sends one opaque frame; the transport serializes concurrent sends so frames cannot
+	/// interleave. Callers racing a concurrent dispose may observe
+	/// <see cref="ObjectDisposedException"/> from the underlying socket. Cancellation is
+	/// honored at frame boundaries: once the frame starts it is written in full, so a
+	/// cancelled send never leaves a torn frame on the stream.
+	/// </summary>
 	Task SendAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default);
 }
 
