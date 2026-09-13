@@ -5,7 +5,6 @@
 ## To Do
 
 ## In Progress
-- [ ] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 - [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
@@ -18,6 +17,7 @@
 - _None_
 
 ## Done
+- [x] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 - [x] [C-6 移植 Gate 加密握手（RSA token，现代化改造）](issues/C-6-gate-encryption-handshake.md) — Owner: AI Agent — Complexity: M
 - [x] [C-5 移植 Gate 出站连接池](issues/C-5-outbound-gate-connection-pool.md) — Owner: AI Agent — Complexity: M
 - [x] [C-4 生成代码禁用同步阻塞](issues/C-4-generator-no-sync-blocking.md) — Owner: AI Agent — Complexity: S
