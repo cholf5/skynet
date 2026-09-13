@@ -1,11 +1,11 @@
 # Kanban Board
 
 ## Backlog
-- [ ] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 
 ## To Do
 
 ## In Progress
+- [ ] [C-9 KCP/UDP 传输 + ReliableQueue 可靠层（远期）](issues/C-9-kcp-reliable-transport.md) — Owner: AI Agent — Complexity: L
 - [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
