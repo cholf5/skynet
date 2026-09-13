@@ -260,11 +260,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		// the call can never complete — fail loudly with the full cycle path instead of hanging.
 		// This is the single interception point: direct calls, ActorRef.CallAsync and generated
 		// RPC proxies all funnel through this method.
-		var callChain = ActorCallContext.CurrentChain;
-		if (callChain is not null && callChain.Contains(to))
-		{
-			throw new ActorCallCycleException($"Actor call cycle detected: {callChain.FormatPath(to, ResolveActorName)}");
-		}
+		ThrowIfCyclicalCall(to);
 
 		var response = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
 		CancellationTokenSource? timeoutSource = null;
@@ -358,7 +354,24 @@ public sealed class ActorSystem : IAsyncDisposable
 		return _transport.SendAsync(envelope, response, cancellationToken);
 	}
 
-	internal MessageEnvelope CreateEnvelope(ActorHandle to, ActorHandle from, CallType callType, object payload)	{
+	/// <summary>
+	/// Fails the call immediately when <paramref name="to"/> is already suspended somewhere on the
+	/// current causal call stack. Kept as a single seam so a future [Reentrant] opt-in can relax
+	/// or bypass the check for annotated actors.
+	/// </summary>
+	/// <param name="to">The target handle of the call about to be issued.</param>
+	private void ThrowIfCyclicalCall(ActorHandle to)
+	{
+		var callChain = ActorCallContext.CurrentChain;
+		if (callChain is not null && callChain.Contains(to))
+		{
+			throw new ActorCallCycleException(
+				$"Actor call cycle detected: {callChain.FormatPath(to, ResolveActorName)}");
+		}
+	}
+
+	internal MessageEnvelope CreateEnvelope(ActorHandle to, ActorHandle from, CallType callType, object payload)
+	{
 		var messageId = Interlocked.Increment(ref _nextMessageId);
 		var traceId = TraceContext.CurrentTraceId ?? TraceContext.EnsureTraceId();
 		// Only calls create blocking edges in the call graph, so only calls propagate the chain.

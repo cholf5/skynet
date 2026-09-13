@@ -2,39 +2,54 @@
 
 - **来源**：D 系列 Code Review 确认"未处理"；上一轮架构评审已标记为核心语义悬而未决分支
 - **开发者**：AI Agent
-- **估算复杂度**：M（决策 + 实现 + 测试）
-- **依赖任务**：无；建议最先做，因为它决定后续所有 Call 图文档与示例的写法
+- **估算复杂度**：S（已决策，收窄实现）
+- **依赖任务**：无
 
-## 目标
+## 决策（维护者已确认）
 
-对"handler 内 `await CallAsync` 挂起整个 mailbox 循环"这一核心语义做出架构决策（ADR）并落地。当前 `ActorHost.RunAsync` 逐条 `await ProcessMessageAsync(message)`（`ActorHost.cs:95`），A call B、B 回调 A 即死锁。云风原版 skynet 的 `skynet.call` 是协程挂起（actor 执行线程 await 期间可继续处理其他消息），本实现是 Actor-on-async 模型的经典陷阱，**这不是成熟度问题，是核心语义必须现在定死的分支**——生态越大，改动的破坏面越大。
+采用 **方案 A+：DAG 文档化 + 环检测诊断**。
 
-## 候选方案（ADR 需逐一评估）
-
-1. **方案 A：文档化 DAG 约束**。维持现状，明确"call 图不得成环"，提供死锁检测/诊断工具（如 call 链 trace + 超时告警）。成本最低，但把陷阱留给用户。
-2. **方案 B：重入 mailbox**。handler await 期间循环继续读下一条消息（消息级重入）。解除死锁，但破坏"严格顺序处理"语义——同一 actor 的两条消息可能交错执行，需明确哪些语义受影响（AGENTS.md 测试清单里的"消息顺序性"）。
-3. **方案 C：skynet 式逻辑协程**。为 call 引入 continuation 挂起/恢复机制（await 不阻塞 mailbox，当前消息的处理挂起，其余消息照常，被 call 的消息恢复后继续）。语义最接近原版 skynet，实现成本最高。
+- 默认语义维持现状：mailbox 严格串行，handler 内 `await CallAsync` 挂起循环（消息 N 完成后才处理 N+1），AGENTS.md 顺序性承诺不变。
+- 框架责任从"容忍环"改为"立刻、清楚地指出环"：`CallAsync` 维护 AsyncLocal 调用链，目标 handle 已在链中即快速失败，报错打印完整环路径。
+- 方案 C（skynet 式协程）被否决，理由记录进 ADR：C# 的 await 点远多于 skynet 的显式让出点，可实现的只有"所有 await 点交错"，牺牲状态隔离这一框架核心卖点，且无编译期防护。
+- 方案 B（`[Reentrant]` opt-in）记入 backlog 预留（本卡不实现），参照 Orleans 先例。
 
 ## 子任务
 
-1. 写 ADR（`docs/adr/` 或 `docs/`）：三个方案的语义矩阵（顺序性保证 / 死锁面 / 实现复杂度 / 与 skynet 原版对齐度）、推荐结论。
-2. 按结论实现（若选 A，实现的是死锁诊断：call 链追踪 + 环检测或至少文档 + FAQ；若选 B/C，改造 `ActorHost.RunAsync` 状态机）。
-3. A→B→A 环状调用回归测试：方案 A 下断言明确的超时/诊断错误，方案 B/C 下断言环完成。
-4. 更新 `docs/architecture.md` 与 AGENTS.md 测试清单中的语义描述。
+1. 写 ADR（`docs/adr/0001-actor-reentrancy-semantics.md` 或仓库文档惯例位置）：三方案语义矩阵结论、A+ 胜出与 C 否决理由、B 的预留说明。
+2. 实现调用链环检测：`ActorSystem.CallAsync`（及 proxy 生成的调用路径，确认共享入口）维护 AsyncLocal 调用链（每项含目标 handle + 消息 id）；检测到目标已在链中 → 抛出带完整环路径的专用异常（如 `ActorCallCycleException("a.login → a.db → a.login")`）。
+3. 回归测试：A→B→A 环状调用断言快速失败且异常信息含环路径；非环深链（A→B→C→A' 不同 actor 实例）不断误报；并行/嵌套场景无 AsyncLocal 串扰。
+4. 更新 `docs/architecture.md` 语义章节与任务卡。
 
 ## 验收标准
 
-- ADR 合并且结论明确、有依据（不是"待定"）。
-- 存在自动化测试固化所选语义（环状调用的行为是断言出来的，不是没测过）。
-- 文档与实现一致；`Actor_Should_Process_Message_In_Order` 类既有语义测试的预期随决策调整并说明理由。
+- ADR 合并，结论明确。
+- 环状调用在开发期快速失败（不是悬挂），异常信息可直接定位环。
+- 既有全量测试绿（零语义迁移）。
 
 ## 测试用例
 
-1. 环状调用：A call B，B call A → 按所选方案断言（超时+诊断 / 完成）。
-2. 顺序性：方案 B/C 下重新定义并验证"哪些消息间顺序仍保证"。
-3. 性能基线：方案 B/C 不得使本地 no-op call 延迟显著退化（对照 PRD 基线流程补测）。
+1. 环：A 的 handler call B，B 的 handler call A → `ActorCallCycleException`，消息含环路径文本。
+2. 非环深链：A→B→C，C 不回调 → 正常完成。
+3. 并发隔离：两个独立调用链互不串扰（AsyncLocal 边界）。
 
 ## 相关文件
 
-- `src/Skynet.Core/ActorHost.cs`、`ActorSystem.cs`（CallAsync 路径）
-- 参考：原版 skynet 的 `skynet.call`/协程语义；Phonest 的 IOManager 投递模型（反面参照）
+- `src/Skynet.Core/ActorSystem.cs`（CallAsync）、`ActorRef.cs`（确认 proxy 调用路径共享入口）
+- `docs/architecture.md`
+- 参考：原版 skynet 的 `skynet.call`/协程语义（ADR 对照用）
+
+## Review 记录
+
+- **规格审查**：通过，但指出 ADR 保证表述过强（"进程内 wait-for 环必然被检测"不成立），
+  已补充披露：本机制覆盖"发起时因果栈环 100% 响亮失败"，不覆盖"收尾边为排队中 call 的
+  wait-for 死锁"（三方互等、纯 call 并行环两个反例，覆盖方案列 backlog）与
+  `_ = Task.Run(...)` 分离任务的误报方向（详见 ADR 0001"作用域与边界"）。
+- **质量审查**：需修复后批准 → 已修复。修复项：(1) 环测试补上 b 的存活断言（验收点是
+  两个 actor 均存活），环路径断言收紧为完整路径片段（避免 `"1"` 是 `"12"` 子串的弱断言）；
+  (2) 环检查抽成 `ActorSystem.ThrowIfCyclicalCall` 私有方法，作为未来 [Reentrant] 的接缝；
+  (3) `CreateEnvelope` 签名归位 Allman；删除 Send 测试冗余断言。
+- **实现决策偏离说明**：卡片子任务 2 要求链项"含目标 handle + 消息 id"，实现只记 handle，
+  消息 id 冗余是有意为之——同一调用链上重复出现同一 handle 即构成环，消息 id 不提供额外
+  判定信息；环路径异常已含完整 handle（及注册名）路径，可直接定位。
+- **结论**：修复后批准（QA Passed）。

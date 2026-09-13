@@ -25,13 +25,12 @@ public sealed class ActorCallCycleTests
 			() => a.CallAsync<object?>(new Route(b.Handle, new Route(a.Handle, new Done()))));
 
 		exception.Message.Should().Contain("Actor call cycle detected:");
-		exception.Message.Should().Contain(" → ");
-		exception.Message.Should().Contain(a.Handle.Value.ToString());
-		exception.Message.Should().Contain(b.Handle.Value.ToString());
+		exception.Message.Should().Contain(
+			$"{a.Handle.Value}(a) → {b.Handle.Value}(b) → {a.Handle.Value}(a)");
 
-		// 环报错后 a 仍能继续处理后续消息（异常不摧毁 actor）。
-		var after = await a.CallAsync<object?>(new Done());
-		after.Should().Be("done");
+		// 环报错后 a、b 均仍能继续处理后续消息（异常不摧毁任何一个 actor）。
+		(await a.CallAsync<object?>(new Done())).Should().Be("done");
+		(await b.CallAsync<object?>(new Done())).Should().Be("done");
 	}
 
 	[Fact]
@@ -90,9 +89,6 @@ public sealed class ActorCallCycleTests
 
 		await a.SendAsync(new Route(b.Handle, new Ping()));
 		await completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
-
-		// a 收到 B 的回 call 并完成信号，说明 B → a 的 call 未被误判为环。
-		completion.Task.IsCompleted.Should().BeTrue();
 	}
 
 	/// <summary>收到 <see cref="Route"/> 时向目标发起嵌套 call；收到 <see cref="Done"/> 时返回 "done"。</summary>
