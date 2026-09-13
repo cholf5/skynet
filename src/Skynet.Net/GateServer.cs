@@ -3,9 +3,11 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Core;
+using Skynet.Net.Encryption;
 
 namespace Skynet.Net;
 
@@ -23,6 +25,7 @@ public sealed class GateServer : IAsyncDisposable
 	private HttpListener? _webSocketListener;
 	private Task? _tcpAcceptLoop;
 	private Task? _webSocketAcceptLoop;
+	private InMemoryGateRsaKeyProvider? _generatedKeyProvider;
 	private bool _disposed;
 
 	public GateServer(ActorSystem system, GateServerOptions options, ILogger<GateServer>? logger = null)
@@ -64,6 +67,13 @@ public sealed class GateServer : IAsyncDisposable
 
 		_lifetimeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 		var token = _lifetimeCts.Token;
+
+		if (_options.EnableEncryption && _options.RsaKeyProvider is null)
+		{
+			_generatedKeyProvider?.Dispose();
+			_generatedKeyProvider = InMemoryGateRsaKeyProvider.Generate(2048);
+			_logger.LogInformation("Gate encryption enabled with a freshly generated 2048-bit RSA keypair.");
+		}
 
 		if (_options.EnableTcp)
 		{
@@ -166,6 +176,9 @@ public sealed class GateServer : IAsyncDisposable
 		_webSocketListener = null;
 		WebSocketEndpoint = null;
 
+		_generatedKeyProvider?.Dispose();
+		_generatedKeyProvider = null;
+
 		cts.Dispose();
 		_lifetimeCts = null;
 	}
@@ -222,92 +235,33 @@ public sealed class GateServer : IAsyncDisposable
 		var sessionId = Guid.NewGuid().ToString("N");
 		var connection = new TcpSessionConnection(client);
 		var metadata = new SessionMetadata(sessionId, "tcp", client.Client.RemoteEndPoint, DateTimeOffset.UtcNow);
-		SessionRuntime? runtime = null;
-		using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-		var sessionToken = sessionCts.Token;
-
-		try
-		{
-			runtime = await CreateSessionRuntimeAsync(connection, metadata, sessionToken).ConfigureAwait(false);
-			_sessions[sessionId] = runtime;
-			var receiveTask = RunTcpReceiveLoopAsync(runtime, client.GetStream(), sessionToken);
-			var idleTask = MonitorIdleAsync(runtime, sessionToken);
-			await receiveTask.ConfigureAwait(false);
-			await sessionCts.CancelAsync();
-			await SafeAwaitAsync(idleTask, sessionId).ConfigureAwait(false);
-		}
-		catch (Exception ex)
-		{
-			_logger.LogError(ex, "TCP session {SessionId} terminated unexpectedly.", sessionId);
-		}
-		finally
-		{
-			if (runtime is not null)
-			{
-				_sessions.TryRemove(runtime.Metadata.SessionId, out _);
-			}
-		}
-	}
-
-	private async Task RunTcpReceiveLoopAsync(SessionRuntime runtime, NetworkStream stream,
-		CancellationToken cancellationToken)
-	{
+		var stream = client.GetStream();
 		var header = new byte[4];
 		var maxBytes = _options.MaxMessageBytes;
-		SessionCloseReason closeReason = SessionCloseReason.ClientDisconnected;
-		string? description = null;
 
-		try
+		async ValueTask<InboundFrame> ReadFrameAsync(CancellationToken token)
 		{
-			while (!cancellationToken.IsCancellationRequested)
+			if (!await ReadExactAsync(stream, header, token).ConfigureAwait(false))
 			{
-				if (!await ReadExactAsync(stream, header, cancellationToken).ConfigureAwait(false))
-				{
-					break;
-				}
-
-				var length = BinaryPrimitives.ReadInt32BigEndian(header);
-				if (length < 0 || length > maxBytes)
-				{
-					closeReason = SessionCloseReason.ProtocolViolation;
-					description = $"Invalid message length {length}.";
-					break;
-				}
-
-				var payload = new byte[length];
-				if (length > 0 && !await ReadExactAsync(stream, payload, cancellationToken).ConfigureAwait(false))
-				{
-					break;
-				}
-
-				runtime.Connection.MarkActivity();
-				await runtime.Actor.SendAsync(new SessionInboundMessage(payload), cancellationToken).ConfigureAwait(false);
-			}
-		}
-		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-		{
-			closeReason = SessionCloseReason.ServerShutdown;
-		}
-		catch (Exception ex)
-		{
-			closeReason = SessionCloseReason.TransportError;
-			description = ex.Message;
-			_logger.LogWarning(ex, "TCP session {SessionId} ended due to transport error.", runtime.Metadata.SessionId);
-		}
-		finally
-		{
-			try
-			{
-				await runtime.Connection.CloseAsync(closeReason, description, CancellationToken.None)
-					.ConfigureAwait(false);
-			}
-			catch (Exception ex)
-			{
-				_logger.LogDebug(ex, "Closing TCP session {SessionId} failed.", runtime.Metadata.SessionId);
+				return new InboundFrame(null, SessionCloseReason.ClientDisconnected, null);
 			}
 
-			await NotifySessionClosedAsync(runtime, closeReason, description).ConfigureAwait(false);
+			var length = BinaryPrimitives.ReadInt32BigEndian(header);
+			if (length < 0 || length > maxBytes)
+			{
+				return new InboundFrame(null, SessionCloseReason.ProtocolViolation, $"Invalid message length {length}.");
+			}
+
+			var payload = new byte[length];
+			if (length > 0 && !await ReadExactAsync(stream, payload, token).ConfigureAwait(false))
+			{
+				return new InboundFrame(null, SessionCloseReason.ClientDisconnected, null);
+			}
+
+			return new InboundFrame(payload, SessionCloseReason.ClientDisconnected, null);
 		}
+
+		await RunSessionAsync(connection, metadata, ReadFrameAsync, cancellationToken).ConfigureAwait(false);
 	}
 
 	private async Task MonitorIdleAsync(SessionRuntime runtime, CancellationToken cancellationToken)
@@ -393,103 +347,295 @@ public sealed class GateServer : IAsyncDisposable
 		var sessionId = Guid.NewGuid().ToString("N");
 		var connection = new WebSocketSessionConnection(socket);
 		var metadata = new SessionMetadata(sessionId, "websocket", remoteEndPoint, DateTimeOffset.UtcNow);
-		SessionRuntime? runtime = null;
-		using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-		var sessionToken = sessionCts.Token;
-
-		try
-		{
-			runtime = await CreateSessionRuntimeAsync(connection, metadata, sessionToken).ConfigureAwait(false);
-			_sessions[sessionId] = runtime;
-			var receiveTask = RunWebSocketReceiveLoopAsync(runtime, socket, sessionToken);
-			var idleTask = MonitorIdleAsync(runtime, sessionToken);
-			await receiveTask.ConfigureAwait(false);
-			await sessionCts.CancelAsync();
-			await SafeAwaitAsync(idleTask, sessionId).ConfigureAwait(false);
-		}
-		catch (Exception ex)
-		{
-			_logger.LogError(ex, "WebSocket session {SessionId} terminated unexpectedly.", sessionId);
-		}
-		finally
-		{
-			if (runtime is not null)
-			{
-				_sessions.TryRemove(runtime.Metadata.SessionId, out _);
-			}
-		}
-	}
-
-	private async Task RunWebSocketReceiveLoopAsync(SessionRuntime runtime, WebSocket socket,
-		CancellationToken cancellationToken)
-	{
 		var buffer = new byte[_options.ReceiveBufferBytes];
+		var maxBytes = _options.MaxMessageBytes;
 		using var accumulator = new MemoryStream();
-		SessionCloseReason reason = SessionCloseReason.ClientDisconnected;
-		string? description = null;
 
-		try
+		async ValueTask<InboundFrame> ReadFrameAsync(CancellationToken token)
 		{
-			while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
+			while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
 			{
-				var result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+				var result = await socket.ReceiveAsync(buffer, token).ConfigureAwait(false);
 				if (result.MessageType == WebSocketMessageType.Close)
 				{
-					reason = SessionCloseReason.ClientDisconnected;
-					description = socket.CloseStatusDescription;
-					break;
+					return new InboundFrame(null, SessionCloseReason.ClientDisconnected, socket.CloseStatusDescription);
 				}
 
 				if (result.MessageType != WebSocketMessageType.Binary &&
-				    result.MessageType != WebSocketMessageType.Text)
+					result.MessageType != WebSocketMessageType.Text)
 				{
 					continue;
 				}
 
-				if (accumulator.Length + result.Count > _options.MaxMessageBytes)
+				if (accumulator.Length + result.Count > maxBytes)
 				{
-					reason = SessionCloseReason.ProtocolViolation;
-					description = "WebSocket frame exceeded maximum size.";
-					break;
+					return new InboundFrame(null, SessionCloseReason.ProtocolViolation, "WebSocket frame exceeded maximum size.");
 				}
 
 				if (result.Count > 0)
 				{
 					accumulator.Write(buffer, 0, result.Count);
-					runtime.Connection.MarkActivity();
 				}
 
 				if (result.EndOfMessage)
 				{
 					var payload = accumulator.ToArray();
 					accumulator.SetLength(0);
-					await runtime.Actor.SendAsync(new SessionInboundMessage(payload), cancellationToken).ConfigureAwait(false);
+					return new InboundFrame(payload, SessionCloseReason.ClientDisconnected, null);
 				}
+			}
+
+			return new InboundFrame(null, SessionCloseReason.ClientDisconnected, socket.CloseStatusDescription);
+		}
+
+		await RunSessionAsync(connection, metadata, ReadFrameAsync, cancellationToken).ConfigureAwait(false);
+	}
+
+	private async Task RunSessionAsync(ISessionConnection connection, SessionMetadata metadata,
+		Func<CancellationToken, ValueTask<InboundFrame>> readFrameAsync, CancellationToken cancellationToken)
+	{
+		var pipeline = CreatePipeline();
+		var lifetime = new SessionLifetimeState();
+		using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		SessionCloseReason closeReason = SessionCloseReason.ClientDisconnected;
+		string? description = null;
+
+		try
+		{
+			if (!pipeline.RequiresHandshake && !await RunAuthenticationAsync(metadata, null, cancellationToken)
+					.ConfigureAwait(false))
+			{
+				closeReason = SessionCloseReason.ProtocolViolation;
+				description = GateHandshakeErrors.AuthRejected;
+				_logger.LogInformation("Session {SessionId} rejected by the authentication callback.", metadata.SessionId);
+				return;
+			}
+
+			if (!pipeline.RequiresHandshake)
+			{
+				// Plaintext mode keeps the legacy flow: the session actor exists from the moment the
+				// connection is accepted and payloads are dispatched without decryption.
+				lifetime.Runtime = await CreateSessionRuntimeAsync(connection, metadata, cancellationToken)
+					.ConfigureAwait(false);
+				_sessions[metadata.SessionId] = lifetime.Runtime;
+				lifetime.IdleTask = MonitorIdleAsync(lifetime.Runtime, idleCts.Token);
+			}
+			else
+			{
+				StartHandshakeWatchdog(connection, pipeline);
+			}
+
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				var frame = await readFrameAsync(cancellationToken).ConfigureAwait(false);
+				if (frame.Payload is null)
+				{
+					closeReason = frame.EndReason;
+					description = frame.Description;
+					break;
+				}
+
+				connection.MarkActivity();
+
+				if (!pipeline.IsReadyForBusiness)
+				{
+					if (await ProcessHandshakeAsync(pipeline, frame.Payload, connection, metadata, lifetime,
+							idleCts.Token, cancellationToken).ConfigureAwait(false))
+					{
+						continue;
+					}
+
+					closeReason = SessionCloseReason.ProtocolViolation;
+					break;
+				}
+
+				byte[] plainPayload;
+				try
+				{
+					plainPayload = pipeline.DecryptInbound(frame.Payload);
+				}
+				catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+				{
+					closeReason = SessionCloseReason.ProtocolViolation;
+					description = $"{GateHandshakeErrors.SessionDecryptFailed}: {ex.Message}";
+					_logger.LogWarning("Session {SessionId} closed: {Description}.", metadata.SessionId, description);
+					break;
+				}
+
+				await lifetime.Runtime!.Actor.SendAsync(new SessionInboundMessage(plainPayload), cancellationToken)
+					.ConfigureAwait(false);
 			}
 		}
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
-			reason = SessionCloseReason.ServerShutdown;
+			closeReason = SessionCloseReason.ServerShutdown;
 		}
-		catch (WebSocketException ex)
+		catch (Exception ex)
 		{
-			reason = SessionCloseReason.TransportError;
+			closeReason = SessionCloseReason.TransportError;
 			description = ex.Message;
-			_logger.LogWarning(ex, "WebSocket session {SessionId} ended with error.", runtime.Metadata.SessionId);
+			_logger.LogWarning(ex, "Session {SessionId} ended due to transport error.", metadata.SessionId);
 		}
 		finally
 		{
+			if (lifetime.Runtime is not null)
+			{
+				_sessions.TryRemove(metadata.SessionId, out _);
+			}
+
 			try
 			{
-				await runtime.Connection.CloseAsync(reason, description, CancellationToken.None).ConfigureAwait(false);
+				await connection.CloseAsync(closeReason, description, CancellationToken.None).ConfigureAwait(false);
 			}
 			catch (Exception ex)
 			{
-				_logger.LogDebug(ex, "Closing WebSocket session {SessionId} failed.", runtime.Metadata.SessionId);
+				_logger.LogDebug(ex, "Closing session {SessionId} failed.", metadata.SessionId);
 			}
 
-			await NotifySessionClosedAsync(runtime, reason, description).ConfigureAwait(false);
+			if (lifetime.Runtime is not null)
+			{
+				await NotifySessionClosedAsync(lifetime.Runtime, closeReason, description).ConfigureAwait(false);
+			}
+			else
+			{
+				// No session actor owns the connection (handshake never completed), so dispose it here.
+				await connection.DisposeAsync().ConfigureAwait(false);
+			}
+
+			if (lifetime.IdleTask is not null)
+			{
+				await idleCts.CancelAsync().ConfigureAwait(false);
+				await SafeAwaitAsync(lifetime.IdleTask, metadata.SessionId).ConfigureAwait(false);
+			}
 		}
+	}
+
+	/// <summary>Mutable per-connection lifetime state shared between the session runner and the handshake step.</summary>
+	private sealed class SessionLifetimeState
+	{
+		public SessionRuntime? Runtime
+		{
+			get;
+			set;
+		}
+
+		public Task? IdleTask
+		{
+			get;
+			set;
+		}
+	}
+
+	/// <summary>
+	/// Processes one frame while the handshake is pending. Returns false when the connection must close
+	/// (handshake failure, authentication rejection or timeout-triggered disconnect).
+	/// </summary>
+	private async Task<bool> ProcessHandshakeAsync(GateSessionPipeline pipeline, byte[] payload,
+		ISessionConnection connection, SessionMetadata metadata, SessionLifetimeState lifetime,
+		CancellationToken idleToken, CancellationToken cancellationToken)
+	{
+		GateHandshakeStep step;
+		try
+		{
+			step = pipeline.ProcessHandshakeFrame(payload);
+		}
+		catch (GateHandshakeException ex)
+		{
+			await TrySendErrorFrameAsync(connection, ex.Code).ConfigureAwait(false);
+			_logger.LogWarning("Session {SessionId} failed the encryption handshake: {Code} {Message}.",
+				metadata.SessionId, ex.Code, ex.Message);
+			return false;
+		}
+
+		if (step.Response is not null)
+		{
+			await connection.SendAsync(step.Response, cancellationToken).ConfigureAwait(false);
+			return true;
+		}
+
+		if (!await RunAuthenticationAsync(metadata, step.SessionKey, cancellationToken).ConfigureAwait(false))
+		{
+			await TrySendErrorFrameAsync(connection, GateHandshakeErrors.AuthRejected).ConfigureAwait(false);
+			_logger.LogInformation("Session {SessionId} rejected by the authentication callback.", metadata.SessionId);
+			return false;
+		}
+
+		pipeline.Activate(step.SessionKey!);
+		var secureConnection = new EncryptedSessionConnection(connection, pipeline.Cipher!);
+		lifetime.Runtime = await CreateSessionRuntimeAsync(secureConnection, metadata, cancellationToken).ConfigureAwait(false);
+		_sessions[metadata.SessionId] = lifetime.Runtime;
+		lifetime.IdleTask = MonitorIdleAsync(lifetime.Runtime, idleToken);
+		await connection.SendAsync(pipeline.BuildConfirmAck(), CancellationToken.None).ConfigureAwait(false);
+		_logger.LogInformation("Session {SessionId} completed the encryption handshake.", metadata.SessionId);
+		return true;
+	}
+
+	private async ValueTask<bool> RunAuthenticationAsync(SessionMetadata metadata, byte[]? sessionKey,
+		CancellationToken cancellationToken)
+	{
+		var callback = _options.AuthCallback;
+		if (callback is null)
+		{
+			return true;
+		}
+
+		return await callback(new GateAuthenticationContext(metadata, sessionKey), cancellationToken)
+			.ConfigureAwait(false);
+	}
+
+	private void StartHandshakeWatchdog(ISessionConnection connection, GateSessionPipeline pipeline)
+	{
+		var timeout = _options.HandshakeTimeout;
+		_ = Task.Run(
+			async () =>
+			{
+				try
+				{
+					await Task.Delay(timeout).ConfigureAwait(false);
+					if (!pipeline.IsReadyForBusiness)
+					{
+						await connection.CloseAsync(
+							SessionCloseReason.ProtocolViolation,
+							$"{GateHandshakeErrors.Timeout}: handshake did not complete within {timeout}.",
+							CancellationToken.None).ConfigureAwait(false);
+					}
+				}
+				catch
+				{
+					// Watchdog failures are irrelevant: the connection is already gone or closing.
+				}
+			},
+			CancellationToken.None);
+	}
+
+	private async ValueTask TrySendErrorFrameAsync(ISessionConnection connection, string errorCode)
+	{
+		try
+		{
+			await connection.SendAsync(GateFrameCodec.EncodeErrorFrame(errorCode), CancellationToken.None)
+				.ConfigureAwait(false);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogDebug(ex, "Failed to deliver handshake error frame {ErrorCode}.", errorCode);
+		}
+	}
+
+	private GateSessionPipeline CreatePipeline()
+	{
+		if (!_options.EnableEncryption)
+		{
+			return GateSessionPipeline.CreatePlaintext();
+		}
+
+		var keyProvider = _options.RsaKeyProvider ?? _generatedKeyProvider
+			?? throw new InvalidOperationException("Gate encryption is enabled but no RSA key provider is available.");
+		var handshake = new GateEncryptionServerSession(
+			keyProvider,
+			tokenLifetime: _options.TokenLifetime,
+			hkdfSalt: _options.HkdfSalt,
+			cipherId: _options.SessionCipherId);
+		return GateSessionPipeline.CreateEncrypted(handshake, _options.SessionCipherId);
 	}
 
 	private async Task<SessionRuntime> CreateSessionRuntimeAsync(ISessionConnection connection,
@@ -556,6 +702,8 @@ public sealed class GateServer : IAsyncDisposable
 
 		return true;
 	}
+
+	private readonly record struct InboundFrame(byte[]? Payload, SessionCloseReason EndReason, string? Description);
 
 	private sealed class SessionRuntime
 	{

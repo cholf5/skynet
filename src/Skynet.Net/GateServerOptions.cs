@@ -1,4 +1,5 @@
 using System.Net;
+using Skynet.Net.Encryption;
 
 namespace Skynet.Net;
 
@@ -79,6 +80,45 @@ public sealed class GateServerOptions
 	public Func<SessionContext, ISessionMessageRouter>? RouterFactory { get; set; }
 
 	/// <summary>
+	/// Gets or sets a value indicating whether connections must complete the RSA token encryption handshake
+	/// before business frames are accepted. Defaults to <c>false</c> to keep wire compatibility with
+	/// unencrypted clients; production deployments exposed to untrusted networks should enable it.
+	/// </summary>
+	public bool EnableEncryption { get; set; }
+
+	/// <summary>
+	/// Gets or sets the RSA key provider used by the encryption handshake. When null and
+	/// <see cref="EnableEncryption"/> is set, the gate generates a fresh 2048-bit keypair on every
+	/// <see cref="GateServer.StartAsync"/>. Provide a persistent implementation for production.
+	/// </summary>
+	public IGateRsaKeyProvider? RsaKeyProvider { get; set; }
+
+	/// <summary>
+	/// Gets or sets the maximum time a connection may spend in the handshake phase before the gate closes it.
+	/// </summary>
+	public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+	/// <summary>Gets or sets the lifetime of handshake tokens issued by the gate.</summary>
+	public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>Gets or sets the session cipher id announced to clients. Only AES-256-GCM (0x01) is built in.</summary>
+	public byte SessionCipherId { get; set; } = AesGcmSessionFrameCipher.DefaultCipherId;
+
+	/// <summary>
+	/// Gets or sets an explicit HKDF salt for session key derivation. When empty the built-in default salt
+	/// is used. Both endpoints must use the same salt.
+	/// </summary>
+	public byte[]? HkdfSalt { get; set; }
+
+	/// <summary>
+	/// Gets or sets the authentication hook. In encrypted mode it runs after the handshake key confirmation
+	/// succeeded but before the session actor is created; in plaintext mode it runs as soon as the
+	/// connection is accepted. Returning false closes the connection with the
+	/// <see cref="GateHandshakeErrors.AuthRejected"/> error code.
+	/// </summary>
+	public Func<GateAuthenticationContext, CancellationToken, ValueTask<bool>>? AuthCallback { get; set; }
+
+	/// <summary>
 	/// Validates the configuration and throws if invalid.
 	/// </summary>
 	public void Validate()
@@ -116,6 +156,24 @@ public sealed class GateServerOptions
 		if (ReceiveBufferBytes < 1024)
 		{
 			throw new InvalidOperationException("ReceiveBufferBytes must be at least 1024 bytes.");
+		}
+
+		if (EnableEncryption)
+		{
+			if (HandshakeTimeout <= TimeSpan.Zero)
+			{
+				throw new InvalidOperationException("HandshakeTimeout must be positive when encryption is enabled.");
+			}
+
+			if (TokenLifetime <= TimeSpan.Zero)
+			{
+				throw new InvalidOperationException("TokenLifetime must be positive when encryption is enabled.");
+			}
+
+			if (SessionCipherId != AesGcmSessionFrameCipher.DefaultCipherId)
+			{
+				throw new InvalidOperationException($"SessionCipherId 0x{SessionCipherId:X2} is not supported.");
+			}
 		}
 	}
 }
