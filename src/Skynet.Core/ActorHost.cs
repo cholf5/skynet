@@ -125,7 +125,7 @@ internal sealed class ActorHost : IAsyncDisposable
 		var traceEnabled = _metrics.IsTracing(Handle);
 		if (traceEnabled)
 		{
-			Logger.LogInformation("Trace[{Handle}] >> {MessageId} {CallType} {PayloadType}", Handle.Value, envelope.MessageId, envelope.CallType, envelope.Payload.GetType().Name);
+			Logger.LogInformation("Trace[{Handle}] >> {MessageId} {CallType} {PayloadType}", Handle.Value, envelope.MessageId, envelope.CallType, envelope.Payload?.GetType().Name ?? "<null>");
 		}
 
 		try

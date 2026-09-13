@@ -14,6 +14,13 @@ namespace Skynet.Cluster;
 /// </summary>
 public sealed class TcpTransport : ITransport, IAsyncDisposable
 {
+	static TcpTransport()
+	{
+		// Fault responses can arrive before this node ever sends one itself; pre-register the
+		// payload so incoming fault envelopes resolve through the contract table.
+		PayloadContractRegistry.Register<RemoteCallFault>();
+	}
+
 	private readonly ActorSystem _system;
 	private readonly IClusterRegistry _registry;
 	private readonly TcpTransportOptions _options;
@@ -553,7 +560,21 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					switch (type)
 					{
 						case FrameType.Envelope:
-							var envelope = MessageEnvelopeSerializer.Deserialize(payload, _serializerOptions);
+							MessageEnvelope envelope;
+							try
+							{
+								envelope = MessageEnvelopeSerializer.Deserialize(payload, _serializerOptions);
+							}
+							catch (UnknownPayloadContractException ex)
+							{
+								// A peer with a different contract set sent an unknown payload id.
+								// Reject the frame but keep the connection alive for future traffic.
+								_logger.LogError(ex,
+									"Rejected envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
+									_remoteNodeId, ex.ContractId);
+								continue;
+							}
+
 							await _transport.HandleIncomingEnvelopeAsync(this, envelope).ConfigureAwait(false);
 							break;
 						case FrameType.Heartbeat:

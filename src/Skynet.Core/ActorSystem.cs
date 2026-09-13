@@ -353,7 +353,7 @@ public sealed class ActorSystem : IAsyncDisposable
 			traceId,
 			DateTimeOffset.UtcNow,
 			TimeToLive: null,
-			Version: 1);
+			Serialization.MessageEnvelopeSerializer.WireVersion);
 	}
 
 	private async ValueTask<bool> RemoveActorAsync(ActorHandle handle, bool notifyRegistry = true)
