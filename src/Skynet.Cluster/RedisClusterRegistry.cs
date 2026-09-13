@@ -17,12 +17,16 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	private readonly ConcurrentDictionary<string, CacheEntry> _nameCache = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<long, CacheEntry> _handleCache = new();
 	private readonly ConcurrentDictionary<string, NodeCacheEntry> _nodeCache = new(StringComparer.Ordinal);
-	private readonly ConcurrentDictionary<string, ActorHandle> _localServices = new(StringComparer.Ordinal);
+	private readonly ConcurrentDictionary<string, LocalRegistration> _localServices = new(StringComparer.Ordinal);
+	// Last state that has been delivered to event subscribers (service name -> encoded location). Used as the
+	// diff baseline for reconciliation so unchanged keys can be suppressed as no-op replays.
+	private readonly ConcurrentDictionary<string, string> _eventSnapshot = new(StringComparer.Ordinal);
 	private readonly CancellationTokenSource _cts = new();
 	private readonly Lock _localServicesLock = new();
 	private readonly IDisposable _subscription;
 	private readonly Task _heartbeatTask;
 	private readonly string _nodeKey;
+	private readonly string _encodedNodeEndpoint;
 	private bool _disposed;
 
 	/// <summary>
@@ -40,7 +44,9 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		_logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<RedisClusterRegistry>();
 		ValidateOptions(options);
 		_nodeKey = NodeKey(options.NodeId);
+		_encodedNodeEndpoint = EncodeEndpoint(options.LocalEndPoint);
 		RegisterNode();
+		_client.ConnectionRestored += OnConnectionRestored;
 		_subscription = _client.Subscribe(GetEventChannel(), OnEventMessage);
 		_heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
 	}
@@ -145,9 +151,9 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 		lock (_localServicesLock)
 		{
-			if (_localServices.TryGetValue(name, out var existing) && existing != handle)
+			if (_localServices.TryGetValue(name, out var existing) && existing.Handle != handle)
 			{
-				throw new InvalidOperationException($"Service '{name}' is already registered locally with handle {existing.Value}.");
+				throw new InvalidOperationException($"Service '{name}' is already registered locally with handle {existing.Handle.Value}.");
 			}
 
 			var location = new ClusterActorLocation(_options.NodeId, handle);
@@ -183,7 +189,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			}
 
 			_client.KeyExpire(handleKey, expiry);
-			_localServices[name] = handle;
+			_localServices[name] = new LocalRegistration(handle, encodedLocation);
 			CacheLocal(location, name);
 			_client.Publish(GetEventChannel(), $"service|{name}|{location.NodeId}|{handle.Value}");
 		}
@@ -220,6 +226,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		}
 
 		_disposed = true;
+		_client.ConnectionRestored -= OnConnectionRestored;
 		await _cts.CancelAsync();
 		try
 		{
@@ -236,7 +243,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			foreach (var pair in _localServices)
 			{
 				_client.KeyDelete(ServiceKey(pair.Key));
-				_client.KeyDelete(HandleKey(pair.Value.Value));
+				_client.KeyDelete(HandleKey(pair.Value.Handle.Value));
 			}
 		}
 
@@ -247,8 +254,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 	private void RegisterNode()
 	{
-		var endpointValue = EncodeEndpoint(_options.LocalEndPoint);
-		_client.SetString(_nodeKey, endpointValue, _options.RegistrationTtl);
+		_client.SetString(_nodeKey, _encodedNodeEndpoint, _options.RegistrationTtl);
 		CacheNode(_options.NodeId, new ClusterNodeDescriptor(_options.NodeId, _options.LocalEndPoint));
 	}
 
@@ -275,14 +281,167 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	private void RefreshLocalEntries()
 	{
 		var expiry = _options.RegistrationTtl;
-		_client.KeyExpire(_nodeKey, expiry);
+		RefreshNodeEntry(expiry);
 		lock (_localServicesLock)
 		{
 			foreach (var pair in _localServices)
 			{
-				_client.KeyExpire(ServiceKey(pair.Key), expiry);
-				_client.KeyExpire(HandleKey(pair.Value.Value), expiry);
+				try
+				{
+					RefreshServiceEntry(pair.Key, pair.Value, expiry);
+				}
+				catch (Exception ex)
+				{
+					// A transient failure on one entry (e.g. a dropped connection) must not abort the
+					// refresh of the remaining entries; every entry is retried on the next heartbeat.
+					_logger.LogWarning(ex, "Failed to refresh registry entry for service '{Name}'.", pair.Key);
+				}
 			}
+		}
+	}
+
+	private void RefreshNodeEntry(TimeSpan expiry)
+	{
+		try
+		{
+			if (_client.KeyExpire(_nodeKey, expiry))
+			{
+				return;
+			}
+
+			// The node key is gone (TTL expired or evicted). Re-register from the value copy taken at startup.
+			_client.SetString(_nodeKey, _encodedNodeEndpoint, expiry);
+			_logger.LogInformation("Node entry '{NodeId}' was missing in Redis and has been re-registered (self-heal).", _options.NodeId);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "Failed to refresh node entry '{NodeId}'.", _options.NodeId);
+		}
+	}
+
+	private void RefreshServiceEntry(string name, LocalRegistration registration, TimeSpan expiry)
+	{
+		var serviceKey = ServiceKey(name);
+		if (!_client.KeyExpire(serviceKey, expiry))
+		{
+			SelfHealServiceKey(name, registration, serviceKey, expiry);
+		}
+
+		var handleKey = HandleKey(registration.Handle.Value);
+		if (!_client.KeyExpire(handleKey, expiry))
+		{
+			SelfHealHandleKey(name, registration.Handle, handleKey, expiry);
+		}
+	}
+
+	/// <summary>
+	/// Re-registers a lost service key from the value copy captured at registration time. The claim is
+	/// conditional (only written when the key is absent), so a racing writer that recreated the key first
+	/// wins and its value is preserved instead of being overwritten (same guarded re-grant pattern as
+	/// EtcdManager.RecoverLeaseAsync).
+	/// </summary>
+	private void SelfHealServiceKey(string name, LocalRegistration registration, string serviceKey, TimeSpan expiry)
+	{
+		if (_client.TryClaimKey(serviceKey, registration.EncodedLocation, expiry, out var owner))
+		{
+			_logger.LogInformation("Service '{Name}' key was lost in Redis and has been re-registered (self-heal).", name);
+			return;
+		}
+
+		if (string.Equals(owner, registration.EncodedLocation, StringComparison.Ordinal))
+		{
+			// A racing self-heal or re-registration restored the identical value; only the TTL needs refreshing.
+			_client.KeyExpire(serviceKey, expiry);
+			return;
+		}
+
+		_logger.LogWarning("Service '{Name}' is now owned by '{Owner}' in Redis; skipping self-heal re-registration.", name, owner);
+	}
+
+	private void SelfHealHandleKey(string name, ActorHandle handle, string handleKey, TimeSpan expiry)
+	{
+		if (_client.TryClaimKey(handleKey, _options.NodeId, expiry, out var owner))
+		{
+			_logger.LogInformation("Handle {Handle} for service '{Name}' was lost in Redis and has been re-registered (self-heal).", handle.Value, name);
+			return;
+		}
+
+		if (string.Equals(owner, _options.NodeId, StringComparison.Ordinal))
+		{
+			_client.KeyExpire(handleKey, expiry);
+			return;
+		}
+
+		_logger.LogWarning("Handle {Handle} for service '{Name}' is now owned by node '{Owner}'; skipping self-heal re-registration.", handle.Value, name, owner);
+	}
+
+	private void OnConnectionRestored()
+	{
+		// StackExchange.Redis raises this on its socket worker thread; Redis I/O must never run there,
+		// so reconciliation is pushed to the thread pool. Exceptions are contained inside the worker.
+		Task.Run(ReconcileSubscription);
+	}
+
+	/// <summary>
+	/// Full-scan diff reconciliation after a pub/sub disconnect: messages published while the subscription
+	/// was down are lost, so the registry re-reads every service key and replays the difference against the
+	/// last delivered state as synthetic events through the regular event handler. Keys whose content is
+	/// unchanged are suppressed (no-op replay) to avoid churn in downstream consumers.
+	/// </summary>
+	private void ReconcileSubscription()
+	{
+		try
+		{
+			var prefix = $"{_options.KeyPrefix}:services:";
+			// Normalize the scan result from full Redis keys to service names before diffing.
+			var current = new Dictionary<string, string>(StringComparer.Ordinal);
+			foreach (var pair in _client.ReadByPrefix(prefix))
+			{
+				current[pair.Key[prefix.Length..]] = pair.Value;
+			}
+
+			var added = 0;
+			var removed = 0;
+			var suppressed = 0;
+
+			// Removed: previously delivered to subscribers but no longer present in Redis.
+			foreach (var name in _eventSnapshot.Keys.ToArray())
+			{
+				if (current.ContainsKey(name) || !_eventSnapshot.TryRemove(name, out var encoded))
+				{
+					continue;
+				}
+
+				if (TrySplitLocation(encoded, out var handleValue))
+				{
+					OnEventMessage($"remove|{name}|{handleValue}");
+					removed++;
+				}
+			}
+
+			// Added or changed: present in Redis but missing from (or different to) the last delivered state.
+			foreach (var pair in current.OrderBy(static p => p.Key, StringComparer.Ordinal))
+			{
+				var name = pair.Key;
+				if (_eventSnapshot.TryGetValue(name, out var seen) && string.Equals(seen, pair.Value, StringComparison.Ordinal))
+				{
+					// The replayed content matches what subscribers already received; suppress the no-op event.
+					suppressed++;
+					continue;
+				}
+
+				_eventSnapshot[name] = pair.Value;
+				OnEventMessage($"service|{name}|{pair.Value}");
+				added++;
+			}
+
+			_logger.LogInformation("Registry reconciliation after reconnect replayed {Added} added, {Removed} removed, {Suppressed} suppressed.", added, removed, suppressed);
+		}
+		catch (Exception ex)
+		{
+			// The reconciliation read itself failed (still disconnected or Redis unavailable); the next
+			// ConnectionRestored trigger retries. Never let this kill the background worker silently.
+			_logger.LogWarning(ex, "Registry reconciliation after reconnect failed.");
 		}
 	}
 
@@ -396,6 +555,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 				}
 
 				var location = new ClusterActorLocation(nodeId, new ActorHandle(handleValue));
+				_eventSnapshot[name] = EncodeLocation(location);
 				CacheLookup(name, location);
 				EnsureNodeCached(nodeId);
 				break;
@@ -403,6 +563,7 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 			case "remove" when parts.Length >= 3:
 			{
 				var name = parts[1];
+				_eventSnapshot.TryRemove(name, out _);
 				_nameCache.TryRemove(name, out _);
 				if (long.TryParse(parts[2], out var handleValue))
 				{
@@ -496,6 +657,13 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 		}
 	}
 
+	private static bool TrySplitLocation(string encoded, out long handleValue)
+	{
+		handleValue = 0;
+		var parts = encoded.Split('|', StringSplitOptions.RemoveEmptyEntries);
+		return parts.Length == 2 && long.TryParse(parts[1], out handleValue);
+	}
+
 	private readonly record struct CacheEntry(ClusterActorLocation Location, DateTimeOffset ExpiresAt)
 	{
 		public bool IsValid => ExpiresAt == DateTimeOffset.MaxValue || ExpiresAt > DateTimeOffset.UtcNow;
@@ -505,4 +673,10 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	{
 		public bool IsValid => ExpiresAt == DateTimeOffset.MaxValue || ExpiresAt > DateTimeOffset.UtcNow;
 	}
+
+	/// <summary>
+	/// A local registration and the encoded value copy kept for self-heal re-registration when the
+	/// corresponding Redis keys are lost.
+	/// </summary>
+	private sealed record LocalRegistration(ActorHandle Handle, string EncodedLocation);
 }

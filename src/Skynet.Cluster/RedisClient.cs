@@ -4,6 +4,18 @@ namespace Skynet.Cluster;
 
 internal interface IRedisClient : IAsyncDisposable
 {
+	/// <summary>
+	/// Raised when the underlying connection drops. This includes every connection type managed by the client
+	/// (interactive and subscription), mirroring <see cref="ConnectionMultiplexer.ConnectionFailed"/>.
+	/// </summary>
+	event Action? ConnectionLost;
+
+	/// <summary>
+	/// Raised when a previously dropped underlying connection has been restored, mirroring
+	/// <see cref="ConnectionMultiplexer.ConnectionRestored"/>.
+	/// </summary>
+	event Action? ConnectionRestored;
+
 	bool TryClaimKey(string key, string value, TimeSpan ttl, out string? existingValue);
 
 	void SetString(string key, string value, TimeSpan ttl);
@@ -17,6 +29,13 @@ internal interface IRedisClient : IAsyncDisposable
 	void Publish(string channel, string message);
 
 	IDisposable Subscribe(string channel, Action<string> handler);
+
+	/// <summary>
+	/// Reads all non-expired string keys whose name starts with <paramref name="prefix"/> (full scan).
+	/// May throw when the connection is down; callers are expected to treat this as a failed reconciliation
+	/// attempt and retry on the next reconnect.
+	/// </summary>
+	IReadOnlyDictionary<string, string> ReadByPrefix(string prefix);
 }
 
 internal sealed class StackExchangeRedisClient : IRedisClient
@@ -25,6 +44,10 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 	private readonly IDatabase _database;
 	private readonly ISubscriber _subscriber;
 	private bool _disposed;
+
+	public event Action? ConnectionLost;
+
+	public event Action? ConnectionRestored;
 
 	public StackExchangeRedisClient(RedisClusterRegistryOptions options)
 	{
@@ -40,6 +63,22 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 		_connection = ConnectionMultiplexer.Connect(configuration);
 		_database = _connection.GetDatabase(options.Database);
 		_subscriber = _connection.GetSubscriber();
+
+		// Wire the real disconnect signals: ConnectionFailed fires for every dropped connection type
+		// (interactive and subscription connections included) and ConnectionRestored fires once the
+		// connection recovers. These are production paths - not test-only hooks.
+		_connection.ConnectionFailed += OnConnectionFailed;
+		_connection.ConnectionRestored += OnConnectionRestored;
+	}
+
+	private void OnConnectionFailed(object? sender, ConnectionFailedEventArgs args)
+	{
+		ConnectionLost?.Invoke();
+	}
+
+	private void OnConnectionRestored(object? sender, ConnectionFailedEventArgs args)
+	{
+		ConnectionRestored?.Invoke();
 	}
 
 	public bool TryClaimKey(string key, string value, TimeSpan ttl, out string? existingValue)
@@ -89,6 +128,27 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 		ArgumentException.ThrowIfNullOrEmpty(channel);
 		ArgumentNullException.ThrowIfNull(message);
 		_subscriber.Publish(RedisChannel.Literal(channel), message, CommandFlags.FireAndForget);
+	}
+
+	public IReadOnlyDictionary<string, string> ReadByPrefix(string prefix)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(prefix);
+		var results = new Dictionary<string, string>(StringComparer.Ordinal);
+		var pattern = $"{prefix}*";
+		foreach (var endpoint in _connection.GetEndPoints(configuredOnly: false))
+		{
+			var server = _connection.GetServer(endpoint);
+			foreach (var key in server.Keys(_database.Database, pattern, 250))
+			{
+				var value = _database.StringGet(key);
+				if (!value.IsNullOrEmpty)
+				{
+					results[key.ToString()] = value.ToString();
+				}
+			}
+		}
+
+		return results;
 	}
 
 	public IDisposable Subscribe(string channel, Action<string> handler)
