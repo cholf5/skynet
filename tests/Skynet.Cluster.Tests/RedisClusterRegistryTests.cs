@@ -1,10 +1,8 @@
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
 using Skynet.Core;
@@ -71,6 +69,111 @@ public sealed class RedisClusterRegistryTests
 		registryB.TryResolveByHandle(handle, out _).Should().BeFalse();
 	}
 
+	[Fact]
+	public async Task ReconnectShouldReplayAddedAndRemovedServices()
+	{
+		var server = new FakeRedisServer();
+		var optionsA = CreateOptions("node-a", 5000);
+		var optionsB = CreateOptions("node-b", 6000);
+		var loggerB = new CapturingLogger();
+		var clientB = server.CreateClient();
+
+		await using var registryA = new RedisClusterRegistry(optionsA, server.CreateClient(), NullLoggerFactory.Instance);
+		await using var registryB = new RedisClusterRegistry(optionsB, clientB, loggerB);
+
+		var removedHandle = new ActorHandle(777);
+		var addedHandle = new ActorHandle(888);
+		registryA.RegisterLocalActor("removed-svc", removedHandle);
+		registryB.TryResolveByName("removed-svc", out _).Should().BeTrue();
+
+		// While node B's subscription is disconnected, node A registers a new service and unregisters the old one.
+		clientB.SimulateConnectionFailure();
+		clientB.IsConnected.Should().BeFalse();
+		registryA.RegisterLocalActor("added-svc", addedHandle);
+		registryA.UnregisterLocalActor("removed-svc", removedHandle);
+
+		// On reconnect, the reconciliation diff must replay both changes as synthetic events.
+		clientB.SimulateReconnect();
+
+		await TestWait.UntilAsync(() => loggerB.Snapshot.Any(entry =>
+			entry.Message.Contains("replayed 1 added, 1 removed, 0 suppressed.", StringComparison.Ordinal)));
+
+		// The replayed events must have been delivered to the existing event subscriber (the cache handler).
+		registryB.TryResolveByName("added-svc", out var added).Should().BeTrue();
+		added.Handle.Should().Be(addedHandle);
+		registryB.TryResolveByName("removed-svc", out _).Should().BeFalse();
+		registryB.TryResolveByHandle(removedHandle, out _).Should().BeFalse();
+	}
+
+	[Fact]
+	public async Task ReconnectShouldSuppressUnchangedKeys()
+	{
+		var server = new FakeRedisServer();
+		var optionsA = CreateOptions("node-a", 5000);
+		var optionsB = CreateOptions("node-b", 6000);
+		var loggerB = new CapturingLogger();
+		var clientB = server.CreateClient();
+
+		await using var registryA = new RedisClusterRegistry(optionsA, server.CreateClient(), NullLoggerFactory.Instance);
+		await using var registryB = new RedisClusterRegistry(optionsB, clientB, loggerB);
+
+		registryA.RegisterLocalActor("stable-svc", new ActorHandle(321));
+		registryB.TryResolveByName("stable-svc", out _).Should().BeTrue();
+
+		// A full disconnect/reconnect cycle without any registry change must not replay any event.
+		clientB.SimulateConnectionFailure();
+		clientB.SimulateReconnect();
+
+		await TestWait.UntilAsync(() => loggerB.Snapshot.Any(entry =>
+			entry.Message.Contains("replayed 0 added, 0 removed, 1 suppressed.", StringComparison.Ordinal)));
+
+		registryB.TryResolveByName("stable-svc", out var stable).Should().BeTrue();
+		stable.Handle.Value.Should().Be(321);
+	}
+
+	[Fact]
+	public async Task ShouldSelfHealAfterKeyExpiry()
+	{
+		var server = new FakeRedisServer();
+		var optionsA = CreateOptions("node-a", 5000);
+		var optionsB = CreateOptions("node-b", 6000);
+		var loggerA = new CapturingLogger();
+
+		await using var registryA = new RedisClusterRegistry(optionsA, server.CreateClient(), loggerA);
+		await using var registryB = new RedisClusterRegistry(optionsB, server.CreateClient(), NullLoggerFactory.Instance);
+
+		var handle = new ActorHandle(42);
+		registryA.RegisterLocalActor("heal", handle);
+		registryB.TryResolveByName("heal", out _).Should().BeTrue();
+
+		// Force the service and handle keys to expire (TTL loss). The next heartbeat must detect the loss
+		// and re-register both keys from the stored value copies.
+		server.ForceExpireKey("skynet:cluster:services:heal");
+		server.ForceExpireKey("skynet:cluster:handles:42");
+
+		// First the entry must disappear (local cache expires, direct read misses), proving the key is gone.
+		await TestWait.UntilAsync(() => !registryB.TryResolveByName("heal", out _));
+
+		// Then the heartbeat self-heal must re-register the keys with the original value copy.
+		await TestWait.UntilAsync(() =>
+		{
+			if (!registryB.TryResolveByName("heal", out var healed))
+			{
+				return false;
+			}
+
+			return healed.NodeId == optionsA.NodeId && healed.Handle == handle;
+		});
+
+		loggerA.Snapshot.Any(entry =>
+			entry.Level == LogLevel.Information &&
+			entry.Message.Contains("self-heal", StringComparison.OrdinalIgnoreCase))
+			.Should().BeTrue();
+
+		registryB.TryResolveByHandle(handle, out var byHandle).Should().BeTrue();
+		byHandle.NodeId.Should().Be(optionsA.NodeId);
+	}
+
 	private static RedisClusterRegistryOptions CreateOptions(string nodeId, int port)
 	{
 		return new RedisClusterRegistryOptions
@@ -82,226 +185,5 @@ public sealed class RedisClusterRegistryTests
 			HeartbeatInterval = TimeSpan.FromMilliseconds(100),
 			CacheTtl = TimeSpan.FromMilliseconds(50)
 		};
-	}
-
-	private sealed class FakeRedisServer
-	{
-		private readonly object _gate = new();
-		private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
-		private readonly ConcurrentDictionary<string, List<Action<string>>> _subscriptions = new(StringComparer.Ordinal);
-
-		public IRedisClient CreateClient()
-		{
-			return new FakeRedisClient(this);
-		}
-
-		internal bool TryClaimKey(string key, string value, TimeSpan ttl, out string? existingValue)
-		{
-			lock (_gate)
-			{
-				if (_entries.TryGetValue(key, out var entry))
-				{
-					if (!entry.IsExpired)
-					{
-						existingValue = entry.Value;
-						return false;
-					}
-
-					_entries.Remove(key);
-				}
-
-				_entries[key] = Entry.Create(value, ttl);
-				existingValue = null;
-				return true;
-			}
-		}
-
-		internal void SetString(string key, string value, TimeSpan ttl)
-		{
-			lock (_gate)
-			{
-				_entries[key] = Entry.Create(value, ttl);
-			}
-		}
-
-		internal string? GetString(string key)
-		{
-			lock (_gate)
-			{
-				if (!_entries.TryGetValue(key, out var entry))
-				{
-					return null;
-				}
-
-				if (entry.IsExpired)
-				{
-					_entries.Remove(key);
-					return null;
-				}
-
-				return entry.Value;
-			}
-		}
-
-		internal bool KeyExpire(string key, TimeSpan ttl)
-		{
-			lock (_gate)
-			{
-				if (_entries.TryGetValue(key, out var entry) && !entry.IsExpired)
-				{
-					_entries[key] = entry.Refresh(ttl);
-					return true;
-				}
-
-				_entries.Remove(key);
-				return false;
-			}
-		}
-
-		internal bool KeyDelete(string key)
-		{
-			lock (_gate)
-			{
-				return _entries.Remove(key);
-			}
-		}
-
-		internal void Publish(string channel, string message)
-		{
-			if (_subscriptions.TryGetValue(channel, out var handlers))
-			{
-				Action<string>[] snapshot;
-				lock (handlers)
-				{
-					snapshot = handlers.ToArray();
-				}
-
-				foreach (var handler in snapshot)
-				{
-					handler(message);
-				}
-			}
-		}
-
-		internal IDisposable Subscribe(string channel, Action<string> handler)
-		{
-			var list = _subscriptions.GetOrAdd(channel, _ => new List<Action<string>>());
-			lock (list)
-			{
-				list.Add(handler);
-			}
-
-			return new Subscription(this, channel, handler);
-		}
-
-		private void Unsubscribe(string channel, Action<string> handler)
-		{
-			if (_subscriptions.TryGetValue(channel, out var list))
-			{
-				lock (list)
-				{
-					list.Remove(handler);
-				}
-			}
-		}
-
-		private readonly struct Entry
-		{
-			private Entry(string value, DateTimeOffset expiry)
-			{
-				Value = value;
-				Expiry = expiry;
-			}
-
-			public string Value { get; }
-			public DateTimeOffset Expiry { get; }
-			public bool IsExpired => DateTimeOffset.UtcNow > Expiry;
-
-			public static Entry Create(string value, TimeSpan ttl)
-			{
-				return new Entry(value, DateTimeOffset.UtcNow.Add(ttl));
-			}
-
-			public Entry Refresh(TimeSpan ttl)
-			{
-				return new Entry(Value, DateTimeOffset.UtcNow.Add(ttl));
-			}
-		}
-
-		private sealed class Subscription : IDisposable
-		{
-			private readonly FakeRedisServer _server;
-			private readonly string _channel;
-			private readonly Action<string> _handler;
-			private bool _disposed;
-
-			public Subscription(FakeRedisServer server, string channel, Action<string> handler)
-			{
-				_server = server;
-				_channel = channel;
-				_handler = handler;
-			}
-
-			public void Dispose()
-			{
-				if (_disposed)
-				{
-					return;
-				}
-
-				_server.Unsubscribe(_channel, _handler);
-				_disposed = true;
-			}
-		}
-	}
-
-	private sealed class FakeRedisClient : IRedisClient
-	{
-		private readonly FakeRedisServer _server;
-
-		public FakeRedisClient(FakeRedisServer server)
-		{
-			_server = server;
-		}
-
-		public bool TryClaimKey(string key, string value, TimeSpan ttl, out string? existingValue)
-		{
-			return _server.TryClaimKey(key, value, ttl, out existingValue);
-		}
-
-		public void SetString(string key, string value, TimeSpan ttl)
-		{
-			_server.SetString(key, value, ttl);
-		}
-
-		public string? GetString(string key)
-		{
-			return _server.GetString(key);
-		}
-
-		public bool KeyExpire(string key, TimeSpan ttl)
-		{
-			return _server.KeyExpire(key, ttl);
-		}
-
-		public bool KeyDelete(string key)
-		{
-			return _server.KeyDelete(key);
-		}
-
-		public void Publish(string channel, string message)
-		{
-			_server.Publish(channel, message);
-		}
-
-		public IDisposable Subscribe(string channel, Action<string> handler)
-		{
-			return _server.Subscribe(channel, handler);
-		}
-
-		public ValueTask DisposeAsync()
-		{
-			return ValueTask.CompletedTask;
-		}
 	}
 }
