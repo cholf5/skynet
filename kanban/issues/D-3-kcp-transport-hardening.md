@@ -46,3 +46,11 @@ KcpTransport 相对 C-3 加固后的 TcpTransport 存在两处实质性裸奔，
 ## 补充（D-2 复审发现的新增验收点）
 
 - **会话复活漏洞**（C-9 既有行为，D-2 复审时发现）：KCP outbound 握手超时后会话从 `_sessionsByConv` 移除，对端**迟到的握手应答**随后到达会被 `RouteDatagram` → `CreateInboundSession` 以 inbound 身份复活该会话。实现死链/入站治理时一并堵住：inbound 会话的创建应要求对端先发握手请求（或对已知 conv 的复活设置明确规则）。
+
+## Review 记录
+
+- **规格审查**：✅ 通过。八项核查全过：死链 fault 链条（Tick → IOException → pump cancel → `_onFault` → `HandleFaultAsync` → DisposeAsync → `OnConnectionClosed` → pending 按连接引用条件删除）无断点，完全复用 D-2 模型；grace 解析与 TCP 逐行一致；会话计数全路径配平（含看门狗回收路径）；tombstone 检查先于 CreateInboundSession、惰性清除仅跑在 receive loop 单线程；握手看门狗仅入站武装（`Start()` 唯一调用点）；测试真实（测试 1 同时断言 pending fail-fast + 会话移除；测试 5 有负控制）；vendored kcp2k 零改动（`kcp.state` 为同程序集 internal）；无夹带。独立复跑 157 绿。
+- **质量审查**：✅ 首轮批准，无 Critical/Important。亮点：看门狗 `Task.Delay` 带 token（吸取了 GateServer 同类问题教训）；Interlocked 守卫注释写明原故障模式；复活测试带负控制。
+- **合入**：分支 `task/d3-kcp-transport-hardening`（ff09caa）已 merge 到 main。
+- **遗留 Minor**（已分流 D-7）：① 握手看门狗残余 check-then-act（`IsCompleted` 检查与 Dispose 之间可误杀刚完成握手的会话，建议 `Task.WhenAny` 改写）；② `_retiredConversations` "无界增长"注释言过其实（过期条目仅在该 conv 再有包到达时才移除），改注释或加机会式清扫；③ `KcpTransport.DisposeAsync` 自身 `_disposed` 仍是裸 bool（KcpConnection 已升格 Interlocked，同文件系两种严谨度）；④ `RouteDatagram` 并发窄缝（TryGetValue 失败 → TryAdd 失败 → 索引器 KeyNotFound 可杀接收循环，既有代码，备忘）；⑤ 死链测试 200ms 固定等待的理论竞态（可改 `WaitForConditionAsync` 等待 pending 注册）。
+- **遗留备忘（记入 D-8）**：`ResolveDeadNodeGracePeriod` 的 XML `<see cref="TcpTransport.ResolveDeadNodeGracePeriod"/>` 指向 private 成员，D-8 拆分后 cref 断链——拆分时下沉为 `(TimeSpan dead, TimeSpan heartbeat)` 签名或改纯文本；`RetiredConversationRetention`（5 分钟私有常量）届时提升为 option。

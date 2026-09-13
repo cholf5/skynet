@@ -25,6 +25,11 @@ C-9 将 KCP 直接放进了 `Skynet.Cluster`。现状虽与 `TcpTransport` 的�
 3. 第三方代码保持目录隔离（`ThirdParty/kcp2k/` + LICENSE/NOTICE 随包迁移），csproj 不向下游传递其源码。
 4. 更新 `Skynet.sln`、`tests`（`KcpTransportTests`、`Reliable/` 移到 `tests/Skynet.Transport.Kcp.Tests`）、`docs/transport.md`、`Directory.Packages.props` 如有涉及。
 
+## 补充（D-3 审查发现的拆分注意点）
+
+- `KcpConnection.ResolveDeadNodeGracePeriod` 的 XML `<see cref="TcpTransport.ResolveDeadNodeGracePeriod"/>` 指向另一类的 private 成员，当前同程序集可解析；**拆分后 cref 断链**——下沉为共享 helper（签名 `(TimeSpan deadNodeGracePeriod, TimeSpan heartbeatInterval)`，放 Skynet.Core）或改纯文本描述。
+- `RetiredConversationRetention`（5 分钟私有常量，会话复活 tombstone 的保留窗口）届时提升为 `KcpTransportOptions` 成员（`TimeSpan.Zero` 禁用）。
+
 ## 验收标准
 
 - `Skynet.Cluster` 不再包含任何 KCP/kcp2k 源文件与引用。

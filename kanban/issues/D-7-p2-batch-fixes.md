@@ -21,6 +21,10 @@
 8. **（D-1 审查遗留）Gate 出站连接 Minor 三项**：`TcpGateClientTransportOptions` 校验风格与 `GateServerOptions.Validate()` 统一；`TcpGateProxyConnection` 构造器 5 参数膨胀（改传 options）；`DisposeAsync` 的 `await Task.CompletedTask` 占位。
 9. **（D-2 审查遗留）KCP 无主响应测试的空转断言**：`TcpTransportTests.cs` 中 `NotContain "Failed to deliver message"` 在回归时走 `TrySetException` 分支、该日志不会出现，断言无效——删除或改写（如断言 node2 未收到反向 fault 响应）。
 10. **（D-2 审查遗留）`TcpConnection` 嵌套类声明缩进**：`TcpTransport.cs:581-582` 多一层 Tab，与同类嵌套 `PendingCall` 不一致。
+11. **（D-3 审查遗留）KCP 握手看门狗残余 check-then-act**：`KcpConnection.cs:178-186`，`IsCompleted` 检查与 Dispose 之间可误杀刚完成握手的入站会话——改 `Task.WhenAny(_handshakeCompleted.Task, Task.Delay(timeout, token))`。
+12. **（D-3 审查遗留）`_retiredConversations` 注释与事实不符**：`KcpTransport.cs:298-299` 声称"cannot grow without bound"但过期条目仅在该 conv 再有包到达时移除——改注释为准确描述，或加机会式清扫（条目超阈值时遍历剔除过期项）。
+13. **（D-3 审查遗留）`KcpTransport.DisposeAsync` 的 `_disposed` 仍是裸 bool check-then-act**（`KcpTransport.cs:639-644`）——对齐 `KcpConnection` 已有的 `Interlocked.Exchange` 模式；顺带删 `KcpTransportTests.cs:604-607` 恒等包装 `GetConversationId`。
+14. **（D-3 审查遗留）死链测试的固定等待**：`KcpTransportTests.cs:447` 的 `Task.Delay(200)` 改 `WaitForConditionAsync(() => transport2!._pendingCalls.Count == 1, ...)` 消除理论竞态。
 
 ## 验收标准
 
