@@ -1,14 +1,14 @@
 # C-8 Actor 定时器设施（skynet.timeout 对应物）
 
 ## Goal
-Skynet 目前没有任何 actor 内定时器设施。参考 Sharpest `TimerManager` 的设计补一个：actor 内注册一次性/周期回调、取消、到期投递回该 actor 的 mailbox 串行执行（不引入额外线程语义），对应 skynet 原版 `skynet.timeout`。
+Skynet 目前没有任何 actor 内定时器设施。参考成熟定时器管理器的设计补一个：actor 内注册一次性/周期回调、取消、到期投递回该 actor 的 mailbox 串行执行（不引入额外线程语义），对应 skynet 原版 `skynet.timeout`。
 
 ## Subtasks
-- [ ] 设计 API：`Actor` 基类提供 `AddTimer(TimeSpan, callback)` / `SchedulePeriodic` / `CancelTimer`，到期消息以系统消息形态入目标 actor mailbox。
-- [ ] 实现调度器：PriorityQueue + 字典索引 + 懒删除（参考 `Sharpest.Core/TimerManager.cs:153-168` 回调锁外执行的做法）。
-- [ ] 并发模型决策：单一全局调度线程投递到期消息（推荐，mailbox 天然串行化），并写进文档。
-- [ ] actor Kill/Stop 时自动清理其定时器。
-- [ ] 单元测试 + 示例。
+- [x] 设计 API：`Actor` 基类提供 `AddTimer(TimeSpan, callback)` / `SchedulePeriodic` / `CancelTimer`，到期消息以系统消息形态入目标 actor mailbox。
+- [x] 实现调度器：PriorityQueue + 字典索引 + 懒删除，回调在锁外执行。
+- [x] 并发模型：单一全局调度线程投递到期消息，mailbox 天然串行化。
+- [x] actor Kill/Stop 时自动清理其定时器。
+- [x] 单元测试 + 示例 + `docs/timers.md`。
 
 ## Developer
 - Owner: AI Agent
@@ -20,17 +20,17 @@ Skynet 目前没有任何 actor 内定时器设施。参考 Sharpest `TimerManag
 - 周期定时器可取消；大量定时器（1 万+）下调度开销可接受。
 
 ## Test Cases
-- [ ] 到期顺序性与串行性（定时器回调与普通消息互斥）。
-- [ ] 取消 / Kill 清理 / 周期定时器。
-- [ ] 压力：1 万定时器注册/触发/取消。
+- [x] 到期顺序性与串行性（定时器回调与普通消息互斥）。
+- [x] 取消 / Kill 清理 / 周期定时器。
+- [x] 压力：1 万定时器注册/触发/取消。
 
 ## Related Files / Design Docs
-- `E:\dev\cholf5\Sharpest\src\Sharpest.Core\TimerManager.cs`、`AsyncTimerManager.cs`
-- `src/Skynet.Core/ActorHost.cs`（mailbox 注入点）
-- `docs/PRD.md`（skynet 语义对齐）
+- `src/Skynet.Core/ActorTimerScheduler.cs`、`TimerHandle.cs`、`TimerFired.cs`
+- `docs/timers.md`
 
 ## Dependencies
 - C-1 修复构建红与测试债
 
 ## Notes & Updates
-- 2026-09-13：任务创建。注意 Sharpest 的 `AddTimer` 有 owner 线程检查而 `Schedule` 没有（API 不一致），以及 `AsyncTimerManager` 不合并重复回调导致主线程卡顿时堆积——这两点在新实现中规避。
+- 2026-09-13：任务创建。规避参考实现的两个问题：owner 线程检查 API 不一致、异步定时器不合并重复回调导致堆积。
+- 2026-09-13：完成。commit `27fab03`，验收 39/39（当时基线）。周期 tick 采用丢拍防堆积设计。

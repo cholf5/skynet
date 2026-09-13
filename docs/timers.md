@@ -40,7 +40,7 @@ bool cancelled = CancelTimer(periodic);
 
 ### 周期定时器的合并（coalescing）
 
-周期定时器带有 pending 标记：上一次 tick 还在目标 actor 的 mailbox 中排队或正在执行时，调度器跳过本次投递、仅顺延下一次到期时间。这保证 actor 短暂卡顿时不会堆积大量重复回调（下游最多积压一个 tick），与 Sharpest `AsyncTimerManager` 不合并回调导致堆积的问题不同。
+周期定时器带有 pending 标记：上一次 tick 还在目标 actor 的 mailbox 中排队或正在执行时，调度器跳过本次投递、仅顺延下一次到期时间。这保证 actor 短暂卡顿时不会堆积大量重复回调（下游最多积压一个 tick），避免了常见"不合并回调"的定时器实现导致下游堆积的问题。
 
 ## 使用注意
 

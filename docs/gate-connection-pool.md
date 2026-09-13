@@ -1,6 +1,6 @@
 # Gate 出站连接池（Gate Connection Pool）
 
-C-5 移植自 Sharpest MicroKit 的「服务 → 多 Gate 出站连接池」。填补 Skynet 只有入站
+填补 Skynet 只有入站
 `GateServer`、没有出站连接管理的空白：一个服务进程通过它同时连接多个 Gate 进程，
 断线自动指数退避重连，并以 round-robin 在所有存活 Gate 之间分发出站消息。
 
