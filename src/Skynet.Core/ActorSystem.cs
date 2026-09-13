@@ -316,7 +316,9 @@ public sealed class ActorSystem : IAsyncDisposable
 			throw exception;
 		}
 
-		await host.Startup.WaitAsync(cancellationToken).ConfigureAwait(false);
+		// Mailbox messages are only consumed after the actor's start hook completes (see ActorHost.RunAsync),
+		// so enqueueing directly preserves startup ordering. Awaiting host.Startup before enqueueing would
+		// deadlock messages an actor sends to itself from within its own start hook.
 		await host.EnqueueAsync(new MailboxMessage(envelope, response), cancellationToken).ConfigureAwait(false);
 	}
 

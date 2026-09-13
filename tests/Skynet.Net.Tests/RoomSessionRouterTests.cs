@@ -87,13 +87,23 @@ public sealed class RoomSessionRouterTests
 
 		public async Task<string> ExpectAsync(string contains, CancellationToken cancellationToken = default)
 		{
-			var buffer = await _messages.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-			var text = Encoding.UTF8.GetString(buffer);
-			if (!string.IsNullOrEmpty(contains))
+			try
 			{
-				text.Should().Contain(contains);
+				var buffer = await _messages.Reader.ReadAsync(cancellationToken).AsTask()
+					.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+				var text = Encoding.UTF8.GetString(buffer);
+				if (!string.IsNullOrEmpty(contains))
+				{
+					text.Should().Contain(contains);
+				}
+
+				return text;
 			}
-			return text;
+			catch (TimeoutException)
+			{
+				throw new TimeoutException(
+					$"Timed out after 10 seconds waiting for a message containing '{contains}'.");
+			}
 		}
 
 		public ValueTask DisposeAsync()

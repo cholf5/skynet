@@ -4,6 +4,8 @@
 
 `RoomManager` keeps track of room membership by mapping `ActorHandle` identifiers to rooms. Each broadcast fans out a `SessionOutboundMessage` to the registered session actors, automatically evicting stale handles when the underlying actor has been terminated.
 
+`RoomBroadcastResult.Enqueued` counts the payloads that were successfully handed off to the actor system (mailbox enqueue). It does **not** imply the session actor has processed the payload; confirmed delivery would require an acknowledgment path.
+
 `RoomSessionRouter` builds on top of the manager and provides a text-based protocol for clients connected through the `GateServer`. It supports the following commands:
 
 | Command | Description |

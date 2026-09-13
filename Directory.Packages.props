@@ -5,9 +5,10 @@
 <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
 <PackageVersion Include="coverlet.collector" Version="6.0.0" />
 <PackageVersion Include="FluentAssertions" Version="6.12.0" />
-    <PackageVersion Include="MessagePack" Version="3.1.4" />
-    <PackageVersion Include="MessagePack.Annotations" Version="3.1.4" />
-    <PackageVersion Include="MessagePackAnalyzer" Version="3.1.4" />
+    <!-- MessagePack 3.1.8 is the latest stable at the time of writing; it resolves the GHSA advisories (NU1902/NU1903) that flagged 3.1.4. -->
+    <PackageVersion Include="MessagePack" Version="3.1.8" />
+    <PackageVersion Include="MessagePack.Annotations" Version="3.1.8" />
+    <PackageVersion Include="MessagePackAnalyzer" Version="3.1.8" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
     <PackageVersion Include="StackExchange.Redis" Version="2.7.33" />

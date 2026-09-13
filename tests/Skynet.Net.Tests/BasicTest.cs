@@ -49,7 +49,16 @@ public sealed class BasicTest
 
 		public async Task<string> ReceiveAsync()
 		{
-			return await _tcs.Task.ConfigureAwait(false);
+			try
+			{
+				return await _tcs.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+			}
+			catch (TimeoutException ex)
+			{
+				throw new TimeoutException(
+					"Timed out after 10 seconds waiting for the session actor to send a message to the connection.",
+					ex);
+			}
 		}
 
 		public ValueTask DisposeAsync()

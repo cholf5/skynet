@@ -12,6 +12,8 @@ namespace Skynet.Net.Tests;
 
 public sealed class GateServerTests
 {
+	private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(10);
+
 	[Fact]
 	public async Task TcpGateDeliversRoundtrip()
 	{
@@ -36,7 +38,7 @@ await using var system = new ActorSystem();
 		endpoint.Should().NotBeNull();
 
 		using var client = new TcpClient();
-		await client.ConnectAsync(endpoint!.Address, endpoint.Port).ConfigureAwait(false);
+		await client.ConnectAsync(endpoint!.Address, endpoint.Port).WaitAsync(WaitTimeout).ConfigureAwait(false);
 		using var stream = client.GetStream();
 
 		await WriteFrameAsync(stream, "hello").ConfigureAwait(false);
@@ -124,7 +126,7 @@ using var client = new ClientWebSocket();
 
 using (var client = new TcpClient())
 {
-await client.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
+await client.ConnectAsync(endpoint.Address, endpoint.Port).WaitAsync(WaitTimeout).ConfigureAwait(false);
 		using var stream = client.GetStream();
 await WriteFrameAsync(stream, "one").ConfigureAwait(false);
 await ReadFrameAsync(stream).ConfigureAwait(false);
@@ -134,7 +136,7 @@ await ReadFrameAsync(stream).ConfigureAwait(false);
 		await first.Closed.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
 using var secondClient = new TcpClient();
-await secondClient.ConnectAsync(endpoint.Address, endpoint.Port).ConfigureAwait(false);
+await secondClient.ConnectAsync(endpoint.Address, endpoint.Port).WaitAsync(WaitTimeout).ConfigureAwait(false);
 using var secondStream = secondClient.GetStream();
 		await WriteFrameAsync(secondStream, "two").ConfigureAwait(false);
 		var response = await ReadFrameAsync(secondStream).ConfigureAwait(false);
@@ -150,17 +152,17 @@ using var secondStream = secondClient.GetStream();
 	{
 		var bytes = Encoding.UTF8.GetBytes(payload);
 		var length = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(bytes.Length));
-		await stream.WriteAsync(length, 0, length.Length).ConfigureAwait(false);
-		await stream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+		await stream.WriteAsync(length, 0, length.Length).WaitAsync(WaitTimeout).ConfigureAwait(false);
+		await stream.WriteAsync(bytes, 0, bytes.Length).WaitAsync(WaitTimeout).ConfigureAwait(false);
 	}
 
 	private static async Task<string> ReadFrameAsync(NetworkStream stream)
 	{
 		var header = new byte[4];
-		await stream.ReadExactlyAsync(header, 0, header.Length).ConfigureAwait(false);
+		await stream.ReadExactlyAsync(header, 0, header.Length).AsTask().WaitAsync(WaitTimeout).ConfigureAwait(false);
 		var length = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(header, 0));
 		var buffer = new byte[length];
-		await stream.ReadExactlyAsync(buffer, 0, length).ConfigureAwait(false);
+		await stream.ReadExactlyAsync(buffer, 0, length).AsTask().WaitAsync(WaitTimeout).ConfigureAwait(false);
 		return Encoding.UTF8.GetString(buffer);
 	}
 

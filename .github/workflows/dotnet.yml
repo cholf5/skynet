@@ -25,4 +25,4 @@ jobs:
         run: dotnet build Skynet.sln --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test Skynet.sln --configuration Release --no-build --collect:"XPlat Code Coverage"
+        run: dotnet test Skynet.sln --configuration Release --no-build --collect:"XPlat Code Coverage" --blame-hang-timeout 5m --blame-hang-dump-type mini

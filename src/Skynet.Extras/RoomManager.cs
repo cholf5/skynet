@@ -99,7 +99,7 @@ public sealed class RoomManager(ActorSystem system, ILogger<RoomManager>? logger
 		}
 
 		var attempts = members.Count;
-		var delivered = 0;
+		var enqueued = 0;
 		var failures = new List<RoomMember>();
 		foreach (var member in members)
 		{
@@ -108,7 +108,7 @@ public sealed class RoomManager(ActorSystem system, ILogger<RoomManager>? logger
 			{
 				await _system.SendAsync(member.SessionHandle, new SessionOutboundMessage(payload),
 					cancellationToken: cancellationToken).ConfigureAwait(false);
-				delivered++;
+				enqueued++;
 			}
 			catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
 			{
@@ -123,7 +123,7 @@ public sealed class RoomManager(ActorSystem system, ILogger<RoomManager>? logger
 			LeaveInternal(roomId, failure.SessionHandle, updateMembership: true);
 		}
 
-		return new RoomBroadcastResult(attempts, delivered, failures.Count);
+		return new RoomBroadcastResult(attempts, enqueued, failures.Count);
 	}
 
 	/// <summary>
@@ -253,7 +253,11 @@ public readonly record struct RoomLeaveResult(RoomMember? Member, bool RoomEmpty
 /// <summary>
 /// Summarizes a broadcast operation.
 /// </summary>
-public readonly record struct RoomBroadcastResult(int Attempted, int Delivered, int Evicted)
+/// <remarks>
+/// <see cref="Enqueued"/> counts messages handed off to the actor system (mailbox enqueue only);
+/// it does not imply the session actor actually processed the payload.
+/// </remarks>
+public readonly record struct RoomBroadcastResult(int Attempted, int Enqueued, int Evicted)
 {
 	public static RoomBroadcastResult Empty
 	{
