@@ -25,6 +25,14 @@ internal sealed class KcpSession
 	/// <summary>Gets the number of segments waiting to be acknowledged or flushed.</summary>
 	public int WaitSend => _kcp.WaitSnd;
 
+	/// <summary>
+	/// Gets a value indicating whether the underlying KCP state machine entered the dead-link
+	/// terminal state (<c>kcp.state == -1</c>): a segment was retransmitted until its retransmission
+	/// budget (<c>dead_link</c>) was exhausted without ever receiving an acknowledgement, which
+	/// means the peer stopped acknowledging traffic entirely (a half-open link).
+	/// </summary>
+	internal bool IsDeadLink => _kcp.state == -1;
+
 	public void Send(byte[] data)
 	{
 		_kcp.Send(data, 0, data.Length);
