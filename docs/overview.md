@@ -42,3 +42,6 @@ Skynet.sln
 3. 设计更完整的部署与监控案例。
 4. 持续完善示例项目与最佳实践。
 
+## 相关文档
+- [Actor 定时器设施](timers.md)：`AddTimer` / `SchedulePeriodic` / `CancelTimer` 用法与并发模型说明。
+

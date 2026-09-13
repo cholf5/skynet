@@ -61,6 +61,17 @@ internal sealed class ActorHost : IAsyncDisposable
 		}
 	}
 
+	/// <summary>
+	/// Enqueues a system message (e.g. a due timer tick) without awaiting. Used by the timer
+	/// scheduler thread, where the unbounded mailbox write always completes synchronously.
+	/// Returns <see langword="false"/> when the actor has already shut down and the message is dropped.
+	/// </summary>
+	internal bool TryEnqueueSystemMessage(MailboxMessage message)
+	{
+		_metrics.OnMessageEnqueued(Handle);
+		return _mailbox.Writer.TryWrite(message);
+	}
+
 	private async Task RunAsync()
 	{
 		try
@@ -103,6 +114,12 @@ internal sealed class ActorHost : IAsyncDisposable
 	{
 		_metrics.OnMessageDequeued(Handle);
 		var envelope = message.Envelope;
+		if (message.SystemCallback is not null)
+		{
+			await ProcessSystemCallbackAsync(message.SystemCallback, envelope).ConfigureAwait(false);
+			return;
+		}
+
 		using var scope = TraceContext.BeginScope(envelope.TraceId);
 		var stopwatch = Stopwatch.StartNew();
 		var traceEnabled = _metrics.IsTracing(Handle);
@@ -138,6 +155,33 @@ internal sealed class ActorHost : IAsyncDisposable
 			{
 				Logger.LogError(ex, "Trace[{Handle}] xx {MessageId} failed after {Elapsed} ms", Handle.Value, envelope.MessageId, stopwatch.Elapsed.TotalMilliseconds);
 			}
+			try
+			{
+				await Actor.OnErrorAsync(envelope, ex, _cts.Token).ConfigureAwait(false);
+			}
+			catch (Exception hookEx)
+			{
+				Logger.LogError(hookEx, "Actor {Handle} error hook failed.", Handle.Value);
+			}
+		}
+	}
+
+	private async Task ProcessSystemCallbackAsync(Func<CancellationToken, ValueTask> callback, MessageEnvelope envelope)
+	{
+		var stopwatch = Stopwatch.StartNew();
+		try
+		{
+			await callback(_cts.Token).ConfigureAwait(false);
+			_metrics.OnMessageProcessed(Handle, stopwatch.Elapsed, true);
+		}
+		catch (OperationCanceledException)
+		{
+			_metrics.OnMessageProcessed(Handle, stopwatch.Elapsed, true);
+		}
+		catch (Exception ex)
+		{
+			_metrics.OnMessageProcessed(Handle, stopwatch.Elapsed, false);
+			Logger.LogError(ex, "Actor {Handle} timer callback for message {MessageId} failed.", Handle.Value, envelope.MessageId);
 			try
 			{
 				await Actor.OnErrorAsync(envelope, ex, _cts.Token).ConfigureAwait(false);
