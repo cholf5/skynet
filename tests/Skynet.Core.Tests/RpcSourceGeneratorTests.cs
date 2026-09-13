@@ -65,6 +65,97 @@ public sealed class RpcSourceGeneratorTests
 		roundtrip.Should().BeEquivalentTo(envelope);
 	}
 
+	[Fact]
+	public void Envelope_Serialize_ShouldWriteStableContractId()
+	{
+		var envelope = new MessageEnvelope(
+			42,
+			new ActorHandle(1),
+			new ActorHandle(2),
+			CallType.Send,
+			new LoginNotice("demo", "ping"),
+			null,
+			DateTimeOffset.UtcNow,
+			null,
+			MessageEnvelopeSerializer.WireVersion);
+
+		var bytes = MessageEnvelopeSerializer.Serialize(envelope);
+		var dto = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(bytes);
+
+		dto.Version.Should().Be(MessageEnvelopeSerializer.WireVersion);
+		dto.PayloadContractId.Should().Be(
+			PayloadContractRegistry.ComputeContractId("Skynet.Core.Tests.RpcSourceGeneratorTests+LoginNotice"));
+	}
+
+	[Fact]
+	public void Deserialize_ShouldThrowForUnknownContractId()
+	{
+		var dto = new SerializedMessageEnvelope
+		{
+			MessageId = 1,
+			From = 1,
+			To = 2,
+			CallType = CallType.Send,
+		// Use an id that no other test registers so the registry state stays unpolluted.
+		PayloadContractId = 555123456,
+		Payload = Array.Empty<byte>(),
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion
+		};
+		var bytes = MessagePackSerializer.Serialize(dto);
+
+		Func<MessageEnvelope> act = () => MessageEnvelopeSerializer.Deserialize(bytes);
+
+		act.Should().Throw<UnknownPayloadContractException>()
+			.Where(exception => exception.ContractId == 555123456)
+			.WithMessage("*555123456*PayloadContractRegistry.Register<T>*");
+	}
+
+	[Fact]
+	public void Deserialize_ShouldRejectLegacyVersion1EnvelopeWithClearError()
+	{
+		// A wire-format version 1 envelope: string payload type name instead of a contract id.
+		var legacy = new LegacySerializedMessageEnvelope
+		{
+			MessageId = 1,
+			From = 1,
+			To = 2,
+			CallType = CallType.Send,
+			PayloadType = "Skynet.Core.Tests.RpcSourceGeneratorTests.LoginNotice, Skynet.Core.Tests",
+			Payload = new byte[] { 1 },
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = 1
+		};
+		var bytes = MessagePackSerializer.Serialize(legacy);
+
+		Func<MessageEnvelope> act = () => MessageEnvelopeSerializer.Deserialize(bytes);
+
+		act.Should().Throw<NotSupportedException>()
+			.WithMessage("*wire protocol version 1*no longer supported*PayloadContractId*");
+	}
+
+	[Fact]
+	public void GeneratedContracts_ShouldRegisterPayloadContractIdsAtModuleInit()
+	{
+		var requestId = PayloadContractRegistry.ComputeContractId(
+			"Skynet.Core.Tests.__Skynet.ILoginActor_LoginAsync_0Request");
+		PayloadContractRegistry.TryResolve(requestId, out var requestType).Should().BeTrue();
+		requestType!.FullName.Should().Be("Skynet.Core.Tests.__Skynet.ILoginActor_LoginAsync_0Request");
+
+		var responseId = PayloadContractRegistry.ComputeContractId(
+			"Skynet.Core.Tests.RpcSourceGeneratorTests+LoginResponse");
+		PayloadContractRegistry.TryResolve(responseId, out var responseType).Should().BeTrue();
+		responseType.Should().Be(typeof(LoginResponse));
+
+		var emptyId = PayloadContractRegistry.ComputeContractId("Skynet.Core.RpcMessages.EmptyPayload");
+		PayloadContractRegistry.TryResolve(emptyId, out var emptyType).Should().BeTrue();
+		emptyType.Should().Be(typeof(global::Skynet.Core.RpcMessages.EmptyPayload));
+	}
+
 	[SkynetActor("login", Unique = true)]
 	public interface ILoginActor
 	{
@@ -102,4 +193,38 @@ public sealed class RpcSourceGeneratorTests
 
 	[MessagePackObject]
 	public sealed record LoginNotice([property: Key(0)] string Username, [property: Key(1)] string Message);
+
+	[MessagePackObject(AllowPrivate = true)]
+	internal sealed class LegacySerializedMessageEnvelope
+	{
+		[Key(0)]
+		public long MessageId { get; set; }
+
+		[Key(1)]
+		public long From { get; set; }
+
+		[Key(2)]
+		public long To { get; set; }
+
+		[Key(3)]
+		public CallType CallType { get; set; }
+
+		[Key(4)]
+		public string? PayloadType { get; set; }
+
+		[Key(5)]
+		public byte[]? Payload { get; set; }
+
+		[Key(6)]
+		public string? TraceId { get; set; }
+
+		[Key(7)]
+		public long Timestamp { get; set; }
+
+		[Key(8)]
+		public long? TimeToLiveTicks { get; set; }
+
+		[Key(9)]
+		public int Version { get; set; }
+	}
 }

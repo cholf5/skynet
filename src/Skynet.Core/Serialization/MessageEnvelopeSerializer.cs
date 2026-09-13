@@ -17,8 +17,13 @@ public sealed class SerializedMessageEnvelope
 	[Key(3)]
 	public CallType CallType { get; init; }
 
+	/// <summary>
+	/// Stable contract id of the payload type; <see cref="PayloadContractRegistry.NullPayloadContractId"/>
+	/// means the payload is <see langword="null"/>. Ids are resolved through
+	/// <see cref="PayloadContractRegistry"/> instead of runtime string-to-type reflection.
+	/// </summary>
 	[Key(4)]
-	public required string PayloadType { get; init; }
+	public required int PayloadContractId { get; init; }
 
 	[Key(5)]
 	public required byte[] Payload { get; init; }
@@ -38,20 +43,45 @@ public sealed class SerializedMessageEnvelope
 
 public static class MessageEnvelopeSerializer
 {
+	/// <summary>
+	/// Wire protocol version that replaced the string <c>PayloadType</c> (AssemblyQualifiedName)
+	/// field with the int <c>PayloadContractId</c> field. Envelopes below this version are rejected.
+	/// </summary>
+	public const int WireVersion = 2;
+
+	private const string LegacyVersionMessage =
+		"Message envelope wire protocol version 1 (string 'PayloadType' / AssemblyQualifiedName) is no longer " +
+		"supported; this node requires wire protocol version 2 (int 'PayloadContractId'). " +
+		"Upgrade every Skynet node in the cluster to a release that uses contract-id based envelopes.";
+
 	public static byte[] Serialize(MessageEnvelope envelope, MessagePackSerializerOptions? options = null)
 	{
 		ArgumentNullException.ThrowIfNull(envelope);
 		options ??= MessagePackSerializerOptions.Standard;
 
-		var payloadType = envelope.Payload.GetType();
-		var payloadBytes = MessagePackSerializer.Serialize(payloadType, envelope.Payload, options);
+		var payloadType = envelope.Payload?.GetType();
+		int contractId;
+		byte[] payloadBytes;
+		if (payloadType is null)
+		{
+			contractId = PayloadContractRegistry.NullPayloadContractId;
+			payloadBytes = Array.Empty<byte>();
+		}
+		else
+		{
+			// The sender knows the concrete type: self-register it on first use so the wire only
+			// ever carries the stable contract id.
+			contractId = PayloadContractRegistry.GetOrRegister(payloadType);
+			payloadBytes = MessagePackSerializer.Serialize(payloadType, envelope.Payload, options);
+		}
+
 		var dto = new SerializedMessageEnvelope
 		{
 			MessageId = envelope.MessageId,
 			From = envelope.From.Value,
 			To = envelope.To.Value,
 			CallType = envelope.CallType,
-			PayloadType = payloadType.AssemblyQualifiedName ?? payloadType.FullName ?? payloadType.Name,
+			PayloadContractId = contractId,
 			Payload = payloadBytes,
 			TraceId = envelope.TraceId,
 			Timestamp = envelope.Timestamp.UtcTicks,
@@ -65,9 +95,42 @@ public static class MessageEnvelopeSerializer
 	public static MessageEnvelope Deserialize(ReadOnlyMemory<byte> buffer, MessagePackSerializerOptions? options = null)
 	{
 		options ??= MessagePackSerializerOptions.Standard;
-		var dto = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(buffer, options);
-		var payloadType = Type.GetType(dto.PayloadType, throwOnError: true) ?? throw new InvalidOperationException($"Unable to resolve payload type '{dto.PayloadType}'.");
-		var payload = MessagePackSerializer.Deserialize(payloadType, dto.Payload, options);
+		SerializedMessageEnvelope dto;
+		try
+		{
+			dto = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(buffer, options);
+		}
+		catch (MessagePackSerializationException exception)
+		{
+			if (IsLegacyWireFormat(buffer, options))
+			{
+				throw new NotSupportedException(LegacyVersionMessage, exception);
+			}
+
+			throw;
+		}
+
+		if (dto.Version < WireVersion)
+		{
+			throw new NotSupportedException(LegacyVersionMessage);
+		}
+
+		object? payload;
+		if (dto.PayloadContractId == PayloadContractRegistry.NullPayloadContractId)
+		{
+			payload = null;
+		}
+		else if (!PayloadContractRegistry.TryResolve(dto.PayloadContractId, out var payloadType))
+		{
+			// Never fall back to Type.GetType: unknown contract ids must fail loudly so version
+			// drift between nodes surfaces as an explicit error instead of arbitrary type loading.
+			throw new UnknownPayloadContractException(dto.PayloadContractId);
+		}
+		else
+		{
+			payload = MessagePackSerializer.Deserialize(payloadType, dto.Payload, options);
+		}
+
 		var timestamp = new DateTimeOffset(dto.Timestamp, TimeSpan.Zero);
 		TimeSpan? ttl = dto.TimeToLiveTicks.HasValue ? TimeSpan.FromTicks(dto.TimeToLiveTicks.Value) : null;
 
@@ -83,4 +146,59 @@ public static class MessageEnvelopeSerializer
 			dto.Version);
 	}
 
+	/// <summary>
+	/// Detects version 1 envelopes (string payload type name at key 4). Their bytes cannot be read
+	/// with the current layout, so a legacy probe type is used to distinguish an old peer from a
+	/// genuinely malformed frame.
+	/// </summary>
+	private static bool IsLegacyWireFormat(ReadOnlyMemory<byte> buffer, MessagePackSerializerOptions options)
+	{
+		try
+		{
+			var legacy = MessagePackSerializer.Deserialize<LegacySerializedMessageEnvelope>(buffer, options);
+			return legacy.Version < WireVersion;
+		}
+		catch (MessagePackSerializationException)
+		{
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Mirror of the version 1 wire layout (string payload type name) used only to produce a clear
+	/// error message when a legacy node is encountered.
+	/// </summary>
+	[MessagePackObject(AllowPrivate = true)]
+	internal sealed class LegacySerializedMessageEnvelope
+	{
+		[Key(0)]
+		public long MessageId { get; set; }
+
+		[Key(1)]
+		public long From { get; set; }
+
+		[Key(2)]
+		public long To { get; set; }
+
+		[Key(3)]
+		public CallType CallType { get; set; }
+
+		[Key(4)]
+		public string? PayloadType { get; set; }
+
+		[Key(5)]
+		public byte[]? Payload { get; set; }
+
+		[Key(6)]
+		public string? TraceId { get; set; }
+
+		[Key(7)]
+		public long Timestamp { get; set; }
+
+		[Key(8)]
+		public long? TimeToLiveTicks { get; set; }
+
+		[Key(9)]
+		public int Version { get; set; }
+	}
 }

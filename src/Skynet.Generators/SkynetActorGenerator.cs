@@ -371,6 +371,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		writer.AppendLine(model.IsUnique ? "true" : "false");
 		writer.Unindent();
 		writer.AppendLine(");");
+		WritePayloadContractRegistrations(writer, model);
 		writer.EndBlock();
 		if (model.ServiceName is not null)
 		{
@@ -380,6 +381,41 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 
 		writer.AppendLine($"internal const bool IsUnique = {(model.IsUnique ? "true" : "false")};");
 		writer.EndBlock();
+	}
+
+	/// <summary>
+	/// Emits payload contract registrations for every request and response payload type used by the
+	/// contract. Generated module initializers register these types into
+	/// <c>Skynet.Core.Serialization.PayloadContractRegistry</c> so the wire protocol only needs the
+	/// stable contract id instead of reflection-resolvable type names.
+	/// </summary>
+	private static void WritePayloadContractRegistrations(SourceWriter writer, ActorContractModel model)
+	{
+		writer.AppendLine();
+		foreach (var method in model.Methods)
+		{
+			if (method.PayloadParameters.Length == 0)
+			{
+				writer.AppendLine(
+					"global::Skynet.Core.Serialization.PayloadContractRegistry.Register<global::Skynet.Core.RpcMessages.EmptyPayload>();");
+				continue;
+			}
+
+			writer.AppendLine(
+				$"global::Skynet.Core.Serialization.PayloadContractRegistry.Register<{method.RequestTypeName}>();");
+		}
+
+		var responseTypes = model.Methods
+			.Select(method => method.ReturnModel)
+			.Where(returnModel => returnModel.Kind is ActorReturnKind.TaskOfT or ActorReturnKind.ValueTaskOfT
+				or ActorReturnKind.Sync)
+			.Select(returnModel => returnModel.InnerTypeDisplay)
+			.Distinct(StringComparer.Ordinal);
+		foreach (var responseDisplay in responseTypes)
+		{
+			writer.AppendLine(
+				$"global::Skynet.Core.Serialization.PayloadContractRegistry.Register<{responseDisplay}>();");
+		}
 	}
 
 	private static void WriteProxy(SourceWriter writer, ActorContractModel model)

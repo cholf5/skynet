@@ -31,6 +31,46 @@ Skynet 遵循“三层一体”的设计：
 - 每个 Actor 维护独立的 `Channel`，避免跨 Actor 干扰。
 - `MessageEnvelope` 统一封装消息体、调用类型、Trace 信息。
 
+## Wire 协议（MessageEnvelope）
+
+跨节点投递时，`MessageEnvelope` 由 `MessageEnvelopeSerializer` 序列化为 `SerializedMessageEnvelope`
+（MessagePack，按 Key 序数组编码）：
+
+| Key | 字段 | 说明 |
+|-----|------|------|
+| 0-3 | `MessageId`、`From`、`To`、`CallType` | 消息标识与路由元数据 |
+| 4 | `PayloadContractId`（int） | payload 类型的稳定合约 id；`0` 保留给 `null` payload |
+| 5 | `Payload`（byte[]） | MessagePack 编码后的 payload |
+| 6-8 | `TraceId`、`Timestamp`、`TimeToLiveTicks` | 追踪与生命周期 |
+| 9 | `Version` | wire 协议版本，当前为 **2** |
+
+### Contract id 分配规则
+- contract id 由 payload 类型 `Type.FullName` 的 **FNV-1a 32 位哈希**（UTF-8 字节）计算得出。
+- id 只依赖类型全名字符串，因此两个节点即使编译顺序、程序集加载顺序不同，对同一类型也会得到相同 id，
+  天然保证跨节点一致性。
+- `PayloadContractRegistry.NullPayloadContractId`（0）保留给 `null` payload；真实类型的哈希若命中 0
+  （概率约 2^-32），将以 `全名#1`、`全名#2` … 确定性重哈希，各节点仍得到一致结果。
+- **冲突检测**：注册时若同一 id 已被不同 FullName 占用，`PayloadContractRegistry.Register` 会抛出
+  异常（节点启动初期即可暴露）；同一类型（或同一 FullName）重复注册是幂等的。
+- 常用基元类型（`string`、数值类型、`Guid`、`byte[]` 等）与 `EmptyPayload` 由 Core 预注册。
+
+### 类型解析（禁止运行时反射）
+- 序列化（发送端）：payload 类型已注册则直接使用其 id；未注册则计算哈希并**自注册**（发送端本就持有
+  具体类型，不涉及字符串反查）。`null` payload 写 contract id 0。
+- 反序列化（接收端）：严格查 `PayloadContractRegistry` 映射表（`contractId → Type`），**不允许**
+  `Type.GetType` 等字符串反查；未知 id 抛出 `UnknownPayloadContractException`（消息中含 contract id
+  与修复提示）。`TcpTransport` 收到此类帧时记录 Error 日志并丢弃该帧，但**连接保持存活**。
+- `[SkynetActor]` 合约的请求/响应 payload 类型由 `SkynetActorGenerator` 在编译期生成
+  `PayloadContractRegistry.Register<T>()` 注册代码（ModuleInitializer 模式），因此使用生成器合约的
+  节点无需手动注册。非合约类型的普通 payload 若要在远端解析，需在接收节点显式
+  `PayloadContractRegistry.Register<T>()`。
+
+### 版本兼容
+- wire 协议版本 2（本版本）开始使用 contract id；版本 1（字符串 `PayloadType` /
+  AssemblyQualifiedName）**不再支持**——反序列化到 v1 帧会抛出 `NotSupportedException`，提示全集群
+  统一升级。这是一个 breaking change，所有节点必须同步升级。
+- 本地 short-circuit 路径不经过序列化（payload 直接传递对象引用），不受该变更影响。
+
 ### Transport 抽象
 - `ITransport` 描述基础投递能力，包含 `SendAsync`、`CallAsync`、`DisposeAsync` 等方法。
 - `InProcTransport` 面向单进程开发，直接将消息投递到目标 Actor 的信箱中。
