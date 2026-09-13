@@ -24,6 +24,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectionLocks = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
 	private readonly MessagePackSerializerOptions _serializerOptions;
+	private readonly TimeSpan _deadNodeGracePeriod;
 	private readonly Task? _acceptLoop;
 	private bool _disposed;
 
@@ -35,6 +36,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		_options = options ?? new TcpTransportOptions();
 		_logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<TcpTransport>();
 		_serializerOptions = _options.SerializerOptions ?? MessagePackSerializerOptions.Standard;
+		_deadNodeGracePeriod = ResolveDeadNodeGracePeriod(_options);
 		var localNodeId = registry.LocalNodeId ??
 		                  throw new InvalidOperationException("The registry does not expose a local node identifier.");
 		if (!_registry.TryGetNode(localNodeId, out var descriptor))
@@ -92,7 +94,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					}
 				}, (this, envelope.MessageId))
 				: default;
-			pending = new PendingCall(response, registration);
+			pending = new PendingCall(location.NodeId, response, registration);
 			if (!_pendingCalls.TryAdd(envelope.MessageId, pending))
 			{
 				await registration.DisposeAsync();
@@ -135,6 +137,14 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			}
 
 			var connection = await ConnectAsync(nodeId, cancellationToken).ConfigureAwait(false);
+			if (_connections.TryGetValue(nodeId, out existing) && existing.IsAlive)
+			{
+				// An inbound connection won the race while we were dialing; keep the existing
+				// connection so both peers agree on a single link and discard our outbound one.
+				await connection.DisposeAsync().ConfigureAwait(false);
+				return existing;
+			}
+
 			_connections[nodeId] = connection;
 			connection.Start(_cts.Token);
 			return connection;
@@ -142,6 +152,73 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		finally
 		{
 			gate.Release();
+		}
+	}
+
+	private static TimeSpan ResolveDeadNodeGracePeriod(TcpTransportOptions options)
+	{
+		if (options.DeadNodeGracePeriod > TimeSpan.Zero)
+		{
+			return options.DeadNodeGracePeriod;
+		}
+
+		return options.HeartbeatInterval > TimeSpan.Zero
+			? TimeSpan.FromTicks(3 * options.HeartbeatInterval.Ticks)
+			: TimeSpan.Zero;
+	}
+
+	/// <summary>
+	/// Registers an inbound connection for its remote node, arbitrating against outbound
+	/// connections created by <see cref="EnsureConnectionAsync"/> through the same per-node gate.
+	/// Without this arbitration the inbound write to <c>_connections</c> would blindly overwrite
+	/// an already healthy outbound connection (last-write-wins), leaving two live links to the
+	/// same node. An existing healthy connection is always kept and the new inbound connection
+	/// is rejected.
+	/// </summary>
+	/// <returns><c>true</c> when the connection was registered; <c>false</c> when it was rejected
+	/// in favor of an existing healthy connection.</returns>
+	private async Task<bool> TryRegisterInboundConnectionAsync(TcpConnection connection)
+	{
+		var gate = _connectionLocks.GetOrAdd(connection.RemoteNodeId, _ => new SemaphoreSlim(1, 1));
+		await gate.WaitAsync(_cts.Token).ConfigureAwait(false);
+		try
+		{
+			if (_connections.TryGetValue(connection.RemoteNodeId, out var existing) &&
+				existing.IsAlive &&
+				!ReferenceEquals(existing, connection))
+			{
+				return false;
+			}
+
+			_connections[connection.RemoteNodeId] = connection;
+			return true;
+		}
+		finally
+		{
+			gate.Release();
+		}
+	}
+
+	/// <summary>
+	/// Fails every pending call that was routed to the given node with the supplied exception so
+	/// no <see cref="TaskCompletionSource{TResult}"/> is left dangling after a disconnect.
+	/// </summary>
+	private void FailPendingCallsForNode(string nodeId, Exception exception)
+	{
+		foreach (var pair in _pendingCalls)
+		{
+			if (!string.Equals(pair.Value.NodeId, nodeId, StringComparison.Ordinal))
+			{
+				continue;
+			}
+
+			if (_pendingCalls.TryRemove(pair.Key, out var pending))
+			{
+				using (pending)
+				{
+					pending.Response.TrySetException(exception);
+				}
+			}
 		}
 	}
 
@@ -162,7 +239,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		await client.ConnectAsync(descriptor.EndPoint.Address, descriptor.EndPoint.Port, connectCts.Token)
 			.ConfigureAwait(false);
 		var connection = new TcpConnection(this, client, outbound: true, _logger, _options.HeartbeatInterval,
-			_serializerOptions);
+			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions);
 		await connection.InitializeAsync(_registry.LocalNodeId!, connectCts.Token).ConfigureAwait(false);
 		return connection;
 	}
@@ -188,10 +265,20 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					try
 					{
 						var connection = new TcpConnection(this, client!, outbound: false, _logger,
-							_options.HeartbeatInterval, _serializerOptions);
+							_options.HeartbeatInterval, _deadNodeGracePeriod, _options.MaxFrameBytes,
+							_serializerOptions);
 						await connection.InitializeAsync(_registry.LocalNodeId!, _cts.Token).ConfigureAwait(false);
-						_connections[connection.RemoteNodeId] = connection;
-						connection.Start(_cts.Token);
+						if (await TryRegisterInboundConnectionAsync(connection).ConfigureAwait(false))
+						{
+							connection.Start(_cts.Token);
+						}
+						else
+						{
+							_logger.LogInformation(
+								"Rejected duplicate inbound connection from node {NodeId}: an active connection already exists.",
+								connection.RemoteNodeId);
+							await connection.DisposeAsync().ConfigureAwait(false);
+						}
 					}
 					catch (Exception ex)
 					{
@@ -341,10 +428,21 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	{
 		private readonly CancellationTokenRegistration _registration;
 
-		internal PendingCall(TaskCompletionSource<object?> response, CancellationTokenRegistration registration)
+		internal PendingCall(string nodeId, TaskCompletionSource<object?> response,
+			CancellationTokenRegistration registration)
 		{
+			NodeId = nodeId;
 			Response = response;
 			_registration = registration;
+		}
+
+		/// <summary>
+		/// Gets the identifier of the node the call was routed to, used to fail pending calls
+		/// when the connection to that node dies.
+		/// </summary>
+		internal string NodeId
+		{
+			get;
 		}
 
 		internal TaskCompletionSource<object?> Response
@@ -382,22 +480,28 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		private readonly bool _outbound;
 		private readonly ILogger _logger;
 		private readonly TimeSpan _heartbeatInterval;
+		private readonly TimeSpan _deadNodeGracePeriod;
+		private readonly int _maxFrameBytes;
 		private readonly MessagePackSerializerOptions _serializerOptions;
 		private readonly SemaphoreSlim _writeLock = new(1, 1);
 		private readonly CancellationTokenSource _cts = new();
+		private long _lastReceivedTickCount = Environment.TickCount64;
 		private Task? _readLoop;
 		private Task? _heartbeatLoop;
 		private string? _remoteNodeId;
 		private bool _disposed;
 
 		internal TcpConnection(TcpTransport transport, TcpClient client, bool outbound, ILogger logger,
-			TimeSpan heartbeatInterval, MessagePackSerializerOptions serializerOptions)
+			TimeSpan heartbeatInterval, TimeSpan deadNodeGracePeriod, int maxFrameBytes,
+			MessagePackSerializerOptions serializerOptions)
 		{
 			_transport = transport;
 			_client = client;
 			_outbound = outbound;
 			_logger = logger;
 			_heartbeatInterval = heartbeatInterval;
+			_deadNodeGracePeriod = deadNodeGracePeriod;
+			_maxFrameBytes = maxFrameBytes;
 			_serializerOptions = serializerOptions;
 			_stream = client.GetStream();
 		}
@@ -475,6 +579,10 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 				if (_remoteNodeId is not null)
 				{
 					_transport._connections.TryRemove(_remoteNodeId, out _);
+					// Fail every pending call routed through this connection so callers observe
+					// the disconnect instead of hanging until their timeout expires.
+					_transport.FailPendingCallsForNode(_remoteNodeId,
+						new RemoteConnectionClosedException(_remoteNodeId));
 				}
 
 				DisposeCore();
@@ -488,6 +596,22 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 				while (!cancellationToken.IsCancellationRequested)
 				{
 					await Task.Delay(_heartbeatInterval, cancellationToken).ConfigureAwait(false);
+
+					// Dead-node detection: if the peer has not sent any frame (including
+					// heartbeats) for longer than the grace period, treat the link as half-open
+					// and close it. Cancellation also terminates the read loop, which then
+					// cleans up the connection and fails its pending calls.
+					var silentFor = TimeSpan.FromMilliseconds(Environment.TickCount64 -
+						Interlocked.Read(ref _lastReceivedTickCount));
+					if (_deadNodeGracePeriod > TimeSpan.Zero && silentFor > _deadNodeGracePeriod)
+					{
+						_logger.LogWarning(
+							"No frames received from node {NodeId} for {SilentFor} (grace period {GracePeriod}); closing the connection as suspected dead.",
+							_remoteNodeId, silentFor, _deadNodeGracePeriod);
+						CancelConnection();
+						return;
+					}
+
 					await WriteFrameAsync(FrameType.Heartbeat, ReadOnlyMemory<byte>.Empty, cancellationToken)
 						.ConfigureAwait(false);
 				}
@@ -540,13 +664,29 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			var typeBuffer = new byte[1];
 			await ReadExactAsync(typeBuffer, cancellationToken).ConfigureAwait(false);
 			var typeByte = typeBuffer[0];
+			// Any received frame (handshake, envelope, or heartbeat) proves the link is alive.
+			Interlocked.Exchange(ref _lastReceivedTickCount, Environment.TickCount64);
 
 			var lengthBuffer = new byte[4];
 			await ReadExactAsync(lengthBuffer, cancellationToken).ConfigureAwait(false);
 			var length = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(lengthBuffer, 0));
 			if (length < 0)
 			{
+				_logger.LogWarning(
+					"Rejected negative frame length {FrameLength} from node {NodeId}; closing the connection.",
+					length, _remoteNodeId);
 				throw new InvalidOperationException("Negative frame length encountered.");
+			}
+
+			if (_maxFrameBytes > 0 && length > _maxFrameBytes)
+			{
+				// Hard-reject oversized frames before allocating anything so a malicious peer
+				// cannot force huge allocations (OOM); the connection is torn down immediately.
+				_logger.LogWarning(
+					"Rejected {FrameLength}-byte frame from node {NodeId}: it exceeds MaxFrameBytes {MaxFrameBytes}; closing the connection.",
+					length, _remoteNodeId, _maxFrameBytes);
+				throw new IOException(
+					$"Frame length {length} exceeds the maximum allowed frame size of {_maxFrameBytes} bytes.");
 			}
 
 			if (length == 0)
@@ -630,6 +770,29 @@ public sealed class TcpTransportOptions
 		get;
 		init;
 	} = TimeSpan.FromSeconds(15);
+
+	/// <summary>
+	/// Gets or sets the maximum allowed frame payload size in bytes. A frame that announces a
+	/// larger payload is rejected and the connection is closed to prevent malicious peers from
+	/// forcing huge allocations. The default is 16 MB.
+	/// </summary>
+	public int MaxFrameBytes
+	{
+		get;
+		init;
+	} = 16 * 1024 * 1024;
+
+	/// <summary>
+	/// Gets or sets the maximum period a connection may receive no frames at all before it is
+	/// considered dead (half-open) and closed. Defaults to <see cref="TimeSpan.Zero"/>, which
+	/// means three times <see cref="HeartbeatInterval"/>. Only effective when
+	/// <see cref="HeartbeatInterval"/> is greater than zero.
+	/// </summary>
+	public TimeSpan DeadNodeGracePeriod
+	{
+		get;
+		init;
+	} = TimeSpan.Zero;
 
 	/// <summary>
 	/// Gets or sets the serializer options applied to envelopes.
