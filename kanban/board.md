@@ -12,7 +12,6 @@
 ## In Progress
 - [ ] [C-3 TcpTransport 健壮性三硬伤](issues/C-3-tcp-transport-hardening.md) — Owner: AI Agent — Complexity: M
 - [ ] [C-7 RedisClusterRegistry 断线对账与自愈](issues/C-7-redis-registry-reconciliation.md) — Owner: AI Agent — Complexity: M
-- [ ] [C-8 Actor 定时器设施](issues/C-8-actor-timers.md) — Owner: AI Agent — Complexity: S
 - [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
@@ -25,6 +24,7 @@
 - _None_
 
 ## Done
+- [x] [C-8 Actor 定时器设施](issues/C-8-actor-timers.md) — Owner: AI Agent — Complexity: S
 - [x] [C-1 修复构建红与测试债](issues/C-1-fix-build-and-test-debt.md) — Owner: AI Agent — Complexity: S
 - [x] [B-3 Documentation — Architecture Deep Dive](issues/B-3-documentation-architecture.md) — Owner: AI Agent — Complexity: M
 - [x] [B-2 Documentation — Getting Started Guide](issues/B-2-documentation-getting-started.md) — Owner: AI Agent — Complexity: M
