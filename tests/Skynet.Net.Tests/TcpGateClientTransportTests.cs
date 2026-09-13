@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using FluentAssertions;
 using Xunit;
 
@@ -122,6 +123,8 @@ public sealed class TcpGateClientTransportTests
 		});
 
 		var observedFailures = new ConcurrentBag<Exception>();
+		var firstSuccess = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var firstFailureObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 		var sawSuccessAfterReconnect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 		var senders = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
 		{
@@ -130,6 +133,7 @@ public sealed class TcpGateClientTransportTests
 				try
 				{
 					await client.Proxy.SendAsync(new byte[16]).ConfigureAwait(false);
+					firstSuccess.TrySetResult();
 					if (reconnected.Task.IsCompleted)
 					{
 						sawSuccessAfterReconnect.TrySetResult();
@@ -139,15 +143,19 @@ public sealed class TcpGateClientTransportTests
 				{
 					// Expected while the old connection is dropped and swapped; nothing may escape.
 					observedFailures.Add(ex);
+					firstFailureObserved.TrySetResult();
 					await Task.Delay(1).ConfigureAwait(false);
 				}
 			}
 		})).ToArray();
 
-		// Let the senders ramp up, then drop the connection from the server side to trigger the
-		// disconnect -> dispose -> reconnect -> replace sequence while sends are in flight.
-		await Task.Delay(100);
+		// Event-driven sequencing (no sleeps): wait until the senders are actually running, drop
+		// the connection from the server side (disconnect -> dispose -> reconnect -> replace
+		// while sends are in flight), wait until the failure path was exercised, then until the
+		// client reconnected and a send succeeded on the replacement connection.
+		await firstSuccess.Task.WaitAsync(WaitTimeout);
 		firstServerClient.Dispose();
+		await firstFailureObserved.Task.WaitAsync(WaitTimeout);
 		await reconnected.Task.WaitAsync(WaitTimeout);
 		await sawSuccessAfterReconnect.Task.WaitAsync(WaitTimeout);
 		await Task.WhenAll(senders).WaitAsync(WaitTimeout);
@@ -159,6 +167,37 @@ public sealed class TcpGateClientTransportTests
 		client.Proxy.ConnectionId.Should().NotBe(firstConnectionId);
 
 		await client.StopAsync();
+	}
+
+	[Fact]
+	public async Task DisposeWakesSendersQueuedOnSendLock()
+	{
+		using var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+
+		var transport = new TcpGateClientTransport();
+		await using var connection = await transport.ConnectAsync(
+			new GateEndpoint("Gate0", GetListenerAddress(listener)));
+		using var serverClient = await listener.AcceptTcpClientAsync().WaitAsync(WaitTimeout);
+
+		// Regression for C-1: DisposeAsync used to dispose the semaphore itself, so a sender
+		// queued on WaitAsync hung forever (the in-flight holder's Release threw
+		// ObjectDisposedException and was swallowed). Hold the transport's send lock directly
+		// (white-box) so a second sender deterministically queues on WaitAsync — the exact
+		// state that used to deadlock — then dispose and mimic the in-flight holder's
+		// finally-release. Sender B must wake and fail instead of hanging.
+		var sendLock = (SemaphoreSlim)typeof(TcpGateProxyConnection)
+			.GetField("_sendLock", BindingFlags.Instance | BindingFlags.NonPublic)!
+			.GetValue(connection)!;
+		await sendLock.WaitAsync();
+
+		var senderB = connection.SendAsync(new byte[16]);
+		senderB.IsCompleted.Should().BeFalse("sender B must be queued on the send lock");
+
+		await connection.DisposeAsync();
+		sendLock.Release();
+
+		await Assert.ThrowsAnyAsync<Exception>(() => senderB.WaitAsync(WaitTimeout));
 	}
 
 	private static byte[] BuildFramePayload(int sender, int sequence)

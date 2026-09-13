@@ -79,6 +79,7 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 	private readonly ILogger _logger;
 	private bool _isConnected = true;
 	private bool _closeRaised;
+	private bool _disposed;
 
 	internal TcpGateProxyConnection(GateEndpoint endpoint, TcpClient client, bool startReceiveLoop,
 		int maxFrameBytes, ILogger? logger)
@@ -125,27 +126,26 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 		await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
 		try
 		{
+			// Once the lock is held the frame is committed: header, payload and flush all run
+			// with CancellationToken.None so a cancelled send can never tear the stream in the
+			// middle of a frame — a torn length-prefixed frame would silently desynchronize
+			// every later frame on this connection and could slip past the frame size limit.
+			// The caller's token is still honored while waiting for the lock and at the frame
+			// boundary check below.
+			cancellationToken.ThrowIfCancellationRequested();
 			var header = new byte[4];
 			BinaryPrimitives.WriteInt32BigEndian(header, payload.Length);
-			await stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
+			await stream.WriteAsync(header).ConfigureAwait(false);
 			if (payload.Length > 0)
 			{
-				await stream.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
+				await stream.WriteAsync(payload).ConfigureAwait(false);
 			}
 
-			await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+			await stream.FlushAsync().ConfigureAwait(false);
 		}
 		finally
 		{
-			try
-			{
-				_sendLock.Release();
-			}
-			catch (ObjectDisposedException)
-			{
-				// DisposeAsync raced with this in-flight send; the connection is closing anyway
-				// and the socket write above already surfaced the failure to the caller.
-			}
+			_sendLock.Release();
 		}
 	}
 
@@ -154,8 +154,8 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 		bool alreadyDisposed;
 		lock (_sync)
 		{
-			alreadyDisposed = !_isConnected;
-			_isConnected = false;
+			alreadyDisposed = _disposed;
+			_disposed = true;
 		}
 
 		if (alreadyDisposed)
@@ -164,10 +164,10 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 		}
 
 		// Disposing the socket aborts in-flight writes with IOException so lock holders exit
-		// promptly; their Release calls are guarded, and later WaitAsync calls fail with
-		// ObjectDisposedException instead of deadlocking.
+		// promptly and release the semaphore, waking senders queued on WaitAsync. The semaphore
+		// itself is never disposed: it holds no unmanaged resources (AvailableWaitHandle is
+		// never touched) and disposing it would strand senders queued on WaitAsync forever.
 		((IDisposable)_client).Dispose();
-		_sendLock.Dispose();
 		await Task.CompletedTask.ConfigureAwait(false);
 	}
 
