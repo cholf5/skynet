@@ -55,7 +55,16 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 	private static readonly DiagnosticDescriptor UnsupportedReturnTypeDescriptor = new(
 		"SKY006",
 		"不支持的返回类型",
-		"接口 {0} 的方法 {1} 返回类型 {2} 不受支持",
+		"接口 {0} 的方法 {1} 返回类型 {2} 无法解析",
+		"Skynet",
+		DiagnosticSeverity.Error,
+		true);
+
+	private static readonly DiagnosticDescriptor SyncReturnTypeDescriptor = new(
+		"SKY007",
+		"不支持同步返回类型",
+		"接口 {0} 的方法 {1} 返回类型 {2} 是同步返回类型：RPC 契约只支持 Task/Task<T>/ValueTask/ValueTask<T>"
+			+ "（void 表示 send 语义）。请改为 Task<{2}> 或 ValueTask<{2}>；若是单向消息，请将返回类型改为 void",
 		"Skynet",
 		DiagnosticSeverity.Error,
 		true);
@@ -301,8 +310,11 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 
 		if (returnType.TypeKind != TypeKind.Error)
 		{
-			returnModel = new ActorReturnModel(returnDisplay, ActorReturnKind.Sync, returnType);
-			return true;
+			diagnostic = Diagnostic.Create(SyncReturnTypeDescriptor,
+				method.Locations.FirstOrDefault() ?? context.TargetNode.GetLocation(),
+				interfaceSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat), method.Name,
+				returnDisplay);
+			return false;
 		}
 
 		diagnostic = Diagnostic.Create(UnsupportedReturnTypeDescriptor,
@@ -407,8 +419,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 
 		var responseTypes = model.Methods
 			.Select(method => method.ReturnModel)
-			.Where(returnModel => returnModel.Kind is ActorReturnKind.TaskOfT or ActorReturnKind.ValueTaskOfT
-				or ActorReturnKind.Sync)
+			.Where(returnModel => returnModel.Kind is ActorReturnKind.TaskOfT or ActorReturnKind.ValueTaskOfT)
 			.Select(returnModel => returnModel.InnerTypeDisplay)
 			.Distinct(StringComparer.Ordinal);
 		foreach (var responseDisplay in responseTypes)
@@ -446,6 +457,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 	private static void WriteProxyMethod(SourceWriter writer, ActorContractModel model, ActorMethodModel method)
 	{
 		var signature = BuildMethodSignature(method);
+		WriteProxyMethodDocComment(writer, method);
 		writer.BeginBlock($"public {method.ReturnModel.DisplayType} {method.Symbol.Name}({signature})");
 		var cancellationName = method.CancellationParameter?.Name ?? "global::System.Threading.CancellationToken.None";
 		string payloadExpression;
@@ -463,8 +475,12 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		switch (method.ReturnModel.Kind)
 		{
 			case ActorReturnKind.Void:
-				writer.AppendLine($"_actor.SendAsync(payload, {cancellationName}).AsTask().GetAwaiter().GetResult();");
-				writer.AppendLine("return;");
+				// send 语义：入队即返回，不等待 actor 处理完成。以 OnlyOnFaulted 续接观察入队
+				// 失败异常（如 actor 系统已释放或入队被取消），避免产生未观察的 Task 异常。
+				writer.AppendLine(
+					$"var enqueueTask = _actor.SendAsync(payload, {cancellationName}).AsTask();");
+				writer.AppendLine(
+					"_ = enqueueTask.ContinueWith(static faulted => _ = faulted.Exception, global::System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);");
 				break;
 			case ActorReturnKind.Task:
 				writer.AppendLine($"return _actor.CallAsync<object?>(payload, cancellationToken: {cancellationName});");
@@ -483,14 +499,24 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 				writer.AppendLine(
 					$"return new global::System.Threading.Tasks.ValueTask<{valueTaskReturn}>(_actor.CallAsync<{valueTaskReturn}>(payload, cancellationToken: {cancellationName}));");
 				break;
-			case ActorReturnKind.Sync:
-				var syncReturn = method.ReturnModel.InnerTypeDisplay;
-				writer.AppendLine(
-					$"return _actor.CallAsync<{syncReturn}>(payload, cancellationToken: {cancellationName}).GetAwaiter().GetResult();");
-				break;
 		}
 
 		writer.EndBlock();
+	}
+
+	/// <summary>
+	/// Emits an XML doc comment on the generated proxy method that states the invocation semantics:
+	/// void contracts are send (fire-and-forget: enqueue and return immediately, without waiting for
+	/// the actor to process the message), everything else is call (await the actor's result).
+	/// </summary>
+	private static void WriteProxyMethodDocComment(SourceWriter writer, ActorMethodModel method)
+	{
+		var semantics = method.ReturnModel.Kind == ActorReturnKind.Void
+			? "send 语义：入队即返回，不等待 actor 处理完成。"
+			: "call 语义：等待 actor 处理完成并返回结果（请使用 await 调用）。";
+		writer.AppendLine("/// <summary>");
+		writer.AppendLine($"/// {semantics}");
+		writer.AppendLine("/// </summary>");
 	}
 
 	private static string BuildMethodSignature(ActorMethodModel method)
@@ -558,9 +584,6 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 				case ActorReturnKind.ValueTaskOfT:
 					writer.AppendLine(
 						$"return await target.{method.Symbol.Name}({callArguments}).ConfigureAwait(false);");
-					break;
-				case ActorReturnKind.Sync:
-					writer.AppendLine($"return target.{method.Symbol.Name}({callArguments});");
 					break;
 			}
 
@@ -683,8 +706,7 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		Task,
 		ValueTask,
 		TaskOfT,
-		ValueTaskOfT,
-		Sync
+		ValueTaskOfT
 	}
 
 	private sealed class SourceWriter

@@ -71,6 +71,18 @@ Skynet 遵循“三层一体”的设计：
   统一升级。这是一个 breaking change，所有节点必须同步升级。
 - 本地 short-circuit 路径不经过序列化（payload 直接传递对象引用），不受该变更影响。
 
+### RPC 契约返回类型约束（breaking change）
+- `[SkynetActor]` 合约接口的方法返回类型只允许 `Task`、`Task<T>`、`ValueTask`、`ValueTask<T>`
+  （call 语义，用 `await` 等待结果）以及 `void`（send 语义）。**同步返回类型不再支持**——
+  含同步返回方法的合约接口会报编译期诊断 **SKY007**（Error 级）。
+- 背景：skynet 的 `skynet.call` 是协程阻塞，C# 的等价表达是 `await`，线程阻塞
+  （`.GetAwaiter().GetResult()`）在 Actor 消息处理内调用 proxy 时会直接死锁。
+- 迁移方式：将 `T Method(...)` 改为 `Task<T> MethodAsync(...)` 或 `ValueTask<T> MethodAsync(...)`
+  （实现侧用 `Task.FromResult` / `ValueTask.FromResult` 包装即可）；单向消息改为 `void` 返回，
+  生成 proxy 对 `void` 方法是真正的 fire-and-forget——入队即返回，不等待 actor 处理完成，
+  入队失败异常通过 `OnlyOnFaulted` 续接观察，不会产生未观察 Task 异常。
+- 生成代码中不再出现任何 `.GetAwaiter().GetResult()` 同步阻塞形态。
+
 ### Transport 抽象
 - `ITransport` 描述基础投递能力，包含 `SendAsync`、`CallAsync`、`DisposeAsync` 等方法。
 - `InProcTransport` 面向单进程开发，直接将消息投递到目标 Actor 的信箱中。

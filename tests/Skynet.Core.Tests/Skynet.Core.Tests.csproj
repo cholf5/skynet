@@ -4,6 +4,7 @@
 	</PropertyGroup>
 <ItemGroup>
 <PackageReference Include="Microsoft.NET.Test.Sdk" />
+<PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
 <PackageReference Include="xunit" />
 <PackageReference Include="xunit.runner.visualstudio" />
 <PackageReference Include="coverlet.collector" />
@@ -16,5 +17,6 @@
 <ItemGroup>
 <ProjectReference Include="..\..\src\Skynet.Core\Skynet.Core.csproj" />
 <ProjectReference Include="..\..\src\Skynet.Cluster\Skynet.Cluster.csproj" />
+<ProjectReference Include="..\..\src\Skynet.Generators\Skynet.Generators.csproj" />
 </ItemGroup>
 </Project>
