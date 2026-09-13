@@ -11,6 +11,12 @@ namespace Skynet.Core;
 /// locally outstanding call id (each node allocates ids from its own counter) would be mistaken
 /// for a response, corrupting the result and silently swallowing the request.
 /// </para>
+/// <para>
+/// <see cref="CallChain"/> carries the causal chain of actors suspended on the current call. It is
+/// an in-process only flow: <see cref="Serialization.MessageEnvelopeSerializer"/> does not
+/// serialize it, so a chain never crosses a node boundary and each remote node re-establishes its
+/// own chain when dispatching.
+/// </para>
 /// </remarks>
 public sealed record MessageEnvelope(
 	long MessageId,
@@ -22,7 +28,8 @@ public sealed record MessageEnvelope(
 	DateTimeOffset Timestamp,
 	TimeSpan? TimeToLive,
 	int Version,
-	bool IsResponse = false)
+	bool IsResponse = false,
+	ActorCallChain? CallChain = null)
 {
 	/// <summary>
 	/// Creates a response envelope derived from the current envelope.

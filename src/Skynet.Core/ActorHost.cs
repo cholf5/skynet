@@ -114,6 +114,13 @@ internal sealed class ActorHost : IAsyncDisposable
 	{
 		_metrics.OnMessageDequeued(Handle);
 		var envelope = message.Envelope;
+		// Establish this actor's position in the causal call chain for the lifetime of the
+		// message. The envelope carries the chain of actors suspended on this call (in-process
+		// calls only); appending our own handle lets nested CallAsync invocations detect cycles
+		// that would deadlock the strictly serial mailbox. System callbacks (timers) run on the
+		// same serial loop, so they participate in the chain as well.
+		using var callChainScope = ActorCallContext.BeginScope(
+			ActorCallChain.Push(envelope.CallChain, envelope.To));
 		if (message.SystemCallback is not null)
 		{
 			await ProcessSystemCallbackAsync(message.SystemCallback, envelope).ConfigureAwait(false);
