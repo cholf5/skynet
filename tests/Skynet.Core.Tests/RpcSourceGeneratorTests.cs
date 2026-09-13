@@ -21,7 +21,7 @@ public sealed class RpcSourceGeneratorTests
 		response.Success.Should().BeTrue();
 		response.WelcomeMessage.Should().Contain("demo");
 
-		var ping = proxy.Ping("guest");
+		var ping = await proxy.PingAsync("guest");
 		ping.Should().Be("PONG: guest");
 
 		await proxy.NotifyAsync(new LoginNotice("demo", "connected"));
@@ -156,12 +156,52 @@ public sealed class RpcSourceGeneratorTests
 		emptyType.Should().Be(typeof(global::Skynet.Core.RpcMessages.EmptyPayload));
 	}
 
+	[Fact]
+	public async Task VoidProxy_ShouldReturnImmediatelyWithoutWaitingForProcessing()
+	{
+		await using var system = new ActorSystem();
+		var slowActor = new SlowActor();
+		var actor = await system.CreateActorAsync(() => slowActor, "slow");
+
+		var proxy = actor.CreateProxy<ISlowActor>();
+		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+		proxy.Fire("work");
+		var enqueueElapsed = stopwatch.Elapsed;
+
+		// send 语义：proxy 调用应在入队后立即返回，远小于 actor 的处理耗时。
+		enqueueElapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(SlowActor.ProcessingMilliseconds / 2));
+
+		// 消息最终仍会被 actor 处理。
+		var completed = await Task.WhenAny(slowActor.Completed, Task.Delay(TimeSpan.FromSeconds(5)));
+		completed.Should().Be(slowActor.Completed);
+	}
+
+	[SkynetActor("slow", Unique = true)]
+	public interface ISlowActor
+	{
+		void Fire(string message);
+	}
+
+	private sealed class SlowActor : RpcActor<ISlowActor>, ISlowActor
+	{
+		public const int ProcessingMilliseconds = 1000;
+		private readonly TaskCompletionSource _processed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		public Task Completed => _processed.Task;
+
+		public void Fire(string message)
+		{
+			Thread.Sleep(ProcessingMilliseconds);
+			_processed.TrySetResult();
+		}
+	}
+
 	[SkynetActor("login", Unique = true)]
 	public interface ILoginActor
 	{
 		Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
 		ValueTask NotifyAsync(LoginNotice notice);
-		string Ping(string name);
+		Task<string> PingAsync(string name);
 	}
 
 	private sealed class LoginActor : RpcActor<ILoginActor>, ILoginActor
@@ -179,9 +219,9 @@ public sealed class RpcSourceGeneratorTests
 			return ValueTask.CompletedTask;
 		}
 
-		public string Ping(string name)
+		public Task<string> PingAsync(string name)
 		{
-			return $"PONG: {name}";
+			return Task.FromResult($"PONG: {name}");
 		}
 	}
 

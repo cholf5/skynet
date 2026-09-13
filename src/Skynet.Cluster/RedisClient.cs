@@ -157,6 +157,9 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 		ArgumentNullException.ThrowIfNull(handler);
 		var redisChannel = RedisChannel.Literal(channel);
 		Action<RedisChannel, RedisValue> wrapped = (_, value) => handler(value!);
+		// 同步阻塞是当前接口的已知约束：本方法在 RedisClusterRegistry 的构造函数中调用（无法使用 async），
+		// 且 StackExchange.Redis 的订阅注册本身只是本地状态更新（订阅数据由独立连接异步接收），
+		// 阻塞窗口极小。若未来将 Subscribe 改为异步（ValueTask SubscribeAsync），可移除该阻塞。
 		_subscriber.SubscribeAsync(redisChannel, wrapped).GetAwaiter().GetResult();
 		return new RedisSubscription(_subscriber, redisChannel, wrapped);
 	}
@@ -187,6 +190,9 @@ internal sealed class StackExchangeRedisClient : IRedisClient
 				return;
 			}
 
+			// 同步阻塞是当前接口的已知约束：RedisSubscription 是同步 IDisposable（由同步 Subscribe 返回），
+			// Dispose 无法改为 async；退订本身只是本地状态更新，阻塞窗口极小。若未来引入
+			// IAsyncDisposable 订阅句柄，可移除该阻塞。
 			subscriber.UnsubscribeAsync(channel, handler).GetAwaiter().GetResult();
 			_disposed = true;
 		}

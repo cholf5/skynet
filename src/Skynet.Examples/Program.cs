@@ -52,7 +52,7 @@ public static class Program
 		var welcome = await login.LoginAsync(new LoginRequest("demo", "password")).Caf();
 		Console.WriteLine($"Login => {welcome.WelcomeMessage}");
 		await login.NotifyAsync(new LoginNotice(welcome.Username, "connected")).Caf();
-		Console.WriteLine($"Ping => {login.Ping(welcome.Username)}");
+		Console.WriteLine($"Ping => {await login.PingAsync(welcome.Username).Caf()}");
 
 		var echo = await system.CreateActorAsync(() => new EchoActor(), "echo").Caf();
 		Console.WriteLine(
@@ -269,7 +269,7 @@ public static class Program
 	{
 		Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
 		ValueTask NotifyAsync(LoginNotice notice);
-		string Ping(string name);
+		Task<string> PingAsync(string name);
 	}
 
 	private sealed class LoginActor : RpcActor<ILoginActor>, ILoginActor
@@ -285,9 +285,9 @@ public static class Program
 			return ValueTask.CompletedTask;
 		}
 
-		public string Ping(string name)
+		public Task<string> PingAsync(string name)
 		{
-			return $"PONG: {name}";
+			return Task.FromResult($"PONG: {name}");
 		}
 	}
 
