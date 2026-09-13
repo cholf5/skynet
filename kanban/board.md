@@ -6,7 +6,6 @@
 ## To Do
 
 ## In Progress
-- [ ] [C-5 移植 Gate 出站连接池](issues/C-5-outbound-gate-connection-pool.md) — Owner: AI Agent — Complexity: M
 - [ ] [C-6 移植 Gate 加密握手（RSA token，现代化改造）](issues/C-6-gate-encryption-handshake.md) — Owner: AI Agent — Complexity: M
 - [ ] [A-1 Repository Skeleton & Tooling Bootstrap](issues/A-1-repo-skeleton.md) — Owner: AI Agent — Complexity: M
 
@@ -20,6 +19,7 @@
 - _None_
 
 ## Done
+- [x] [C-5 移植 Gate 出站连接池](issues/C-5-outbound-gate-connection-pool.md) — Owner: AI Agent — Complexity: M
 - [x] [C-4 生成代码禁用同步阻塞](issues/C-4-generator-no-sync-blocking.md) — Owner: AI Agent — Complexity: S
 - [x] [C-2 Contract ID 映射表：消灭远端 Type.GetType 反射](issues/C-2-contract-id-mapping.md) — Owner: AI Agent — Complexity: M
 - [x] [C-7 RedisClusterRegistry 断线对账与自愈](issues/C-7-redis-registry-reconciliation.md) — Owner: AI Agent — Complexity: M
