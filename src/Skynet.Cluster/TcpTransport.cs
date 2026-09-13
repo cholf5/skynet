@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
 using MessagePack;
@@ -27,9 +28,19 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	private readonly ILogger<TcpTransport> _logger;
 	private readonly TcpListener _listener;
 	private readonly CancellationTokenSource _cts = new();
-	private readonly ConcurrentDictionary<string, TcpConnection> _connections = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectionLocks = new(StringComparer.Ordinal);
-	private readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
+
+	/// <summary>
+	/// Pending remote calls keyed by message id. Internal for test introspection; do not mutate
+	/// outside of the pending-call lifecycle paths.
+	/// </summary>
+	internal readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
+
+	/// <summary>
+	/// Live connections keyed by remote node id. Internal for test introspection; do not mutate
+	/// outside of the connection lifecycle paths.
+	/// </summary>
+	internal readonly ConcurrentDictionary<string, TcpConnection> _connections = new(StringComparer.Ordinal);
 	private readonly MessagePackSerializerOptions _serializerOptions;
 	private readonly TimeSpan _deadNodeGracePeriod;
 	private readonly Task? _acceptLoop;
@@ -110,7 +121,43 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			}
 		}
 
-		var connection = await EnsureConnectionAsync(location.NodeId, cancellationToken).ConfigureAwait(false);
+		TcpConnection connection;
+		try
+		{
+			connection = await EnsureConnectionAsync(location.NodeId, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			// A failed connect (refused, handshake rejected) must fail-fast the pending call so the
+			// caller's TaskCompletionSource is never left dangling; concurrent calls each remove
+			// their own entry, so batch failures cannot leak.
+			if (pending is not null && _pendingCalls.TryRemove(envelope.MessageId, out var failed))
+			{
+				failed.Response.TrySetException(new IOException(
+					$"Failed to establish a connection to node '{location.NodeId}'.", ex));
+				failed.Dispose();
+			}
+
+			throw;
+		}
+		catch (OperationCanceledException)
+		{
+			// Cancellation (caller token or connect timeout) must surface as-is instead of being
+			// masked as an IOException. The pending entry is still removed so a connect timeout on
+			// a non-cancelable token cannot leak it; for cancellable tokens the pending's own
+			// cancellation registration usually removes it first.
+			if (pending is not null && _pendingCalls.TryRemove(envelope.MessageId, out var canceled))
+			{
+				canceled.Dispose();
+			}
+
+			throw;
+		}
+
+		// Scope the pending call to the connection it will be sent on so a disconnect can fail
+		// exactly the calls routed through the dying connection (see OnConnectionClosed).
+		pending?.Connection = connection;
+
 		try
 		{
 			await connection.SendEnvelopeAsync(envelope, cancellationToken).ConfigureAwait(false);
@@ -207,14 +254,41 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	}
 
 	/// <summary>
-	/// Fails every pending call that was routed to the given node with the supplied exception so
-	/// no <see cref="TaskCompletionSource{TResult}"/> is left dangling after a disconnect.
+	/// Cleans up after a connection's read loop has ended. The registered connection slot is only
+	/// released when this connection is still the registered link: a replacement connection may
+	/// already own the node after a reconnect, and removing it would be an ABA error.
 	/// </summary>
-	private void FailPendingCallsForNode(string nodeId, Exception exception)
+	internal void OnConnectionClosed(TcpConnection connection)
+	{
+		if (!connection.TryGetRemoteNodeId(out var nodeId))
+		{
+			return;
+		}
+
+		// Atomic conditional remove (key + value): only succeeds when the registered connection is
+		// still this one, so a concurrently registered replacement can never be removed here.
+		_connections.TryRemove(new KeyValuePair<string, TcpConnection>(nodeId, connection));
+
+		// Fail every pending call that was routed through this connection — regardless of whether
+		// it was still the registered link, because its read loop has ended and no response can
+		// ever arrive on it. Pending calls carry a Connection reference, so this can never touch
+		// pending calls belonging to a replacement connection (and a pending registered after the
+		// removal above is scoped to the replacement, not to this dead connection). Pendings that
+		// are still dialing (Connection not yet assigned) are intentionally not failed here; they
+		// are handled by the connect failure path in SendAsync or by the caller's own timeout.
+		FailPendingCallsForNode(new RemoteConnectionClosedException(nodeId), connection);
+	}
+
+	/// <summary>
+	/// Fails every pending call that was routed through the given connection with the supplied
+	/// exception so no <see cref="TaskCompletionSource{TResult}"/> is left dangling after a
+	/// disconnect.
+	/// </summary>
+	private void FailPendingCallsForNode(Exception exception, TcpConnection connection)
 	{
 		foreach (var pair in _pendingCalls)
 		{
-			if (!string.Equals(pair.Value.NodeId, nodeId, StringComparison.Ordinal))
+			if (!ReferenceEquals(pair.Value.Connection, connection))
 			{
 				continue;
 			}
@@ -303,25 +377,38 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 	private async Task HandleIncomingEnvelopeAsync(TcpConnection connection, MessageEnvelope envelope)
 	{
-		if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
+		// Only response envelopes may complete a pending call. A request frame from the peer
+		// carries a MessageId from the peer's own counter, which can collide with the ids of
+		// this node's outstanding calls; matching it would corrupt the pending call's result
+		// and silently swallow the request.
+		if (envelope.IsResponse)
 		{
-			using (pending)
+			if (_pendingCalls.TryRemove(envelope.MessageId, out var pending))
 			{
-				switch (envelope.Payload)
+				using (pending)
 				{
-					case RemoteCallFault { IsCancellation: true }:
-						pending.Response.TrySetCanceled();
-						break;
-					case RemoteCallFault fault:
-						pending.Response.TrySetException(
-							new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
-						break;
-					default:
-						pending.Response.TrySetResult(envelope.Payload);
-						break;
+					switch (envelope.Payload)
+					{
+						case RemoteCallFault { IsCancellation: true }:
+							pending.Response.TrySetCanceled();
+							break;
+						case RemoteCallFault fault:
+							pending.Response.TrySetException(
+								new RpcDispatchException(fault.Message ?? "Remote actor reported an error."));
+							break;
+						default:
+							pending.Response.TrySetResult(envelope.Payload);
+							break;
+					}
 				}
+
+				return;
 			}
 
+			// A response with no pending call (the caller already timed out or the connection was
+			// replaced) has nowhere to go; never deliver it to a local actor as a request.
+			_logger.LogWarning("Dropped a stale response for message {MessageId} from node {NodeId}.",
+				envelope.MessageId, connection.RemoteNodeId);
 			return;
 		}
 
@@ -431,7 +518,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		_cts.Dispose();
 	}
 
-	private sealed class PendingCall : IDisposable
+	internal sealed class PendingCall : IDisposable
 	{
 		private readonly CancellationTokenRegistration _registration;
 
@@ -450,6 +537,18 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		internal string NodeId
 		{
 			get;
+		}
+
+		/// <summary>
+		/// Gets or sets the connection the call was sent on, assigned by <see cref="TcpTransport.SendAsync"/>
+		/// once the connection is established. Used by <see cref="TcpTransport.OnConnectionClosed"/> to
+		/// fail exactly the calls routed through the dying connection. <see langword="null"/> while the
+		/// call is still establishing its connection.
+		/// </summary>
+		internal TcpConnection? Connection
+		{
+			get;
+			set;
 		}
 
 		internal TaskCompletionSource<object?> Response
@@ -479,8 +578,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		[property: Key(1)] string ExceptionType,
 		[property: Key(2)] string? Message);
 
-	private sealed class TcpConnection : IAsyncDisposable
-	{
+		internal sealed class TcpConnection : IAsyncDisposable
+		{
 		private readonly TcpTransport _transport;
 		private readonly TcpClient _client;
 		private readonly NetworkStream _stream;
@@ -515,6 +614,15 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		internal string RemoteNodeId =>
 			_remoteNodeId ?? throw new InvalidOperationException("Handshake not completed.");
+
+		/// <summary>
+		/// Gets a value indicating whether the handshake completed and the remote node id is known.
+		/// </summary>
+		internal bool TryGetRemoteNodeId([MaybeNullWhen(false)] out string nodeId)
+		{
+			nodeId = _remoteNodeId;
+			return nodeId is not null;
+		}
 
 		internal bool IsAlive => !_cts.IsCancellationRequested && _client.Connected;
 
@@ -597,15 +705,9 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			}
 			finally
 			{
-				if (_remoteNodeId is not null)
-				{
-					_transport._connections.TryRemove(_remoteNodeId, out _);
-					// Fail every pending call routed through this connection so callers observe
-					// the disconnect instead of hanging until their timeout expires.
-					_transport.FailPendingCallsForNode(_remoteNodeId,
-						new RemoteConnectionClosedException(_remoteNodeId));
-				}
-
+				// Conditional cleanup: a replacement connection may already be registered for this
+				// node (reconnect race), so only shared state owned by this connection is released.
+				_transport.OnConnectionClosed(this);
 				DisposeCore();
 			}
 		}

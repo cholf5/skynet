@@ -26,6 +26,12 @@ public sealed class ActorSystem : IAsyncDisposable
 	private bool _disposed;
 
 	/// <summary>
+	/// Gets the most recently allocated message id. Introspection hook for tests that need to
+	/// reason about cross-node message id alignment (each system allocates from its own counter).
+	/// </summary>
+	internal long LastAllocatedMessageId => Interlocked.Read(ref _nextMessageId);
+
+	/// <summary>
 	/// Initializes a new instance of the <see cref="ActorSystem"/> class.
 	/// </summary>
 	/// <param name="loggerFactory">Factory used to create per-actor loggers.</param>
