@@ -176,6 +176,41 @@ public sealed class RpcSourceGeneratorTests
 		completed.Should().Be(slowActor.Completed);
 	}
 
+	[Fact]
+	public async Task VoidProxy_ShouldRaiseHookAndCounterWhenEnqueueFaults()
+	{
+		// Fire-and-forget send 永不向调用方抛出入队异常：transport 在 system 之下被释放后，
+		// 入队以异步失败任务收场，必须经由 SendEnqueueFailed 钩子 + 指标计数暴露，
+		// 而不是被生成代码静默吞掉（此前为 `_ = faulted.Exception`）。
+		InProcTransport? transport = null;
+		await using var system = new ActorSystem(
+			transportFactory: sys => transport = new InProcTransport(sys,
+				new InProcTransportOptions { ShortCircuitLocalDelivery = false }));
+		var slowActor = new SlowActor();
+		var actor = await system.CreateActorAsync(() => slowActor, "slow");
+
+		var hooked = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+		ActorRef? hookedActor = null;
+		system.SendEnqueueFailed += (actorRef, exception) =>
+		{
+			hookedActor = actorRef;
+			hooked.TrySetResult(exception);
+		};
+
+		var proxy = actor.CreateProxy<ISlowActor>();
+		proxy.Fire("before");
+
+		// 释放 transport（system 仍在运行）：下一次 send 的入队任务将异步失败。
+		await transport!.DisposeAsync();
+		proxy.Fire("after");
+
+		var observed = await hooked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+		observed.Should().BeOfType<ObjectDisposedException>();
+		hookedActor.Should().NotBeNull();
+		hookedActor!.Handle.Value.Should().Be(actor.Handle.Value);
+		system.Metrics.SendEnqueueFailureCount.Should().Be(1);
+	}
+
 	[SkynetActor("slow", Unique = true)]
 	public interface ISlowActor
 	{

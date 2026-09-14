@@ -81,6 +81,33 @@ public sealed class ActorSystemTests
 		second.Handle.Should().Be(first.Handle);
 	}
 
+	[Fact]
+	public async Task CallAsync_ShouldFailFastWithStartupExceptionWhenStartHookFails()
+	{
+		// DeliverLocalAsync no longer awaits the start hook, so a message enqueued while the start
+		// hook is in flight must not hang forever when the hook fails: the host drains the mailbox
+		// and fails every queued completion with the original startup exception.
+		await using var system = new ActorSystem();
+		var startEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var releaseStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		var createTask = system.CreateActorAsync(
+			() => new FailingStartActor(startEntered, releaseStart), "fails");
+
+		// Name registration happens before the start hook completes, so the actor is reachable
+		// while its start hook is still running.
+		var remote = system.GetByName("fails");
+		var callTask = remote.CallAsync<string>(new Ping(), TimeSpan.FromSeconds(30));
+		await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+		releaseStart.TrySetResult(); // the start hook now fails
+
+		Func<Task> act = async () => await callTask;
+		(await act.Should().ThrowAsync<InvalidOperationException>().WaitAsync(TimeSpan.FromSeconds(10)))
+			.Which.Message.Should().Contain("start hook failed");
+		await Assert.ThrowsAsync<InvalidOperationException>(() => createTask);
+	}
+
 	private sealed class CounterActor : Actor
 	{
 		private int _count;
@@ -124,5 +151,31 @@ public sealed class ActorSystemTests
 
 	private sealed record GetCount;
 
+	private sealed class FailingStartActor : Actor
+	{
+		private readonly TaskCompletionSource _startEntered;
+		private readonly TaskCompletionSource _releaseStart;
+
+		public FailingStartActor(TaskCompletionSource startEntered, TaskCompletionSource releaseStart)
+		{
+			_startEntered = startEntered;
+			_releaseStart = releaseStart;
+		}
+
+		protected override async ValueTask HandleStartAsync(CancellationToken cancellationToken)
+		{
+			_startEntered.TrySetResult();
+			await _releaseStart.Task.WaitAsync(cancellationToken);
+			throw new InvalidOperationException("start hook failed");
+		}
+
+		protected override Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
+		{
+			return Task.FromResult<object?>(null);
+		}
+	}
+
 	private sealed record Fail;
+
+	private sealed record Ping;
 }

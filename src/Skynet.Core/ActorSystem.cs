@@ -68,6 +68,20 @@ public sealed class ActorSystem : IAsyncDisposable
 	public ActorMetricsCollector Metrics { get; }
 
 	/// <summary>
+	/// Raised when a generated void (send) proxy observes that a fire-and-forget enqueue failed
+	/// (e.g. the transport was disposed or the enqueue was canceled). The send path never throws
+	/// to its caller, so this hook — together with the <see cref="ActorMetricsCollector"/> send
+	/// failure counter — is the only way to observe such failures.
+	/// </summary>
+	public event Action<ActorRef, Exception>? SendEnqueueFailed;
+
+	internal void OnSendEnqueueFailed(ActorRef actor, Exception exception)
+	{
+		Metrics.OnSendEnqueueFailed();
+		SendEnqueueFailed?.Invoke(actor, exception);
+	}
+
+	/// <summary>
 	/// Gets the timer scheduler that delivers due timer callbacks to actor mailboxes.
 	/// </summary>
 	internal ActorTimerScheduler Timers => _timers;
