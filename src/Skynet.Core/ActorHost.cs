@@ -93,7 +93,19 @@ internal sealed class ActorHost : IAsyncDisposable
 			while (_mailbox.Reader.TryRead(out var pending))
 			{
 				_metrics.OnMessageDequeued(Handle);
-				pending.Completion?.TrySetException(ex);
+				// Mirror the regular processing path semantics: cancellation completes canceled,
+				// everything else faults — and both are counted like processed messages so the
+				// error metric does not miss the drained ones.
+				if (ex is OperationCanceledException)
+				{
+					pending.Completion?.TrySetCanceled(_cts.Token);
+					_metrics.OnMessageProcessed(Handle, TimeSpan.Zero, true);
+				}
+				else
+				{
+					pending.Completion?.TrySetException(ex);
+					_metrics.OnMessageProcessed(Handle, TimeSpan.Zero, false);
+				}
 			}
 
 			_stopped.TrySetResult(true);

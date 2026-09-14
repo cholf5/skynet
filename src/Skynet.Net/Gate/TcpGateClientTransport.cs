@@ -14,7 +14,6 @@ namespace Skynet.Net;
 public sealed class TcpGateClientTransport : IGateClientTransport
 {
 	private readonly TcpGateClientTransportOptions _options;
-	private readonly int _maxFrameBytes;
 	private readonly ILogger _logger;
 
 	public TcpGateClientTransport(TcpGateClientTransportOptions? options = null, ILogger? logger = null)
@@ -22,7 +21,6 @@ public sealed class TcpGateClientTransport : IGateClientTransport
 		_options = options ?? new TcpGateClientTransportOptions();
 		_options.Validate();
 
-		_maxFrameBytes = _options.MaxFrameBytes;
 		_logger = logger ?? NullLogger.Instance;
 	}
 

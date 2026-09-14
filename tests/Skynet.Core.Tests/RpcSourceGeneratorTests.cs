@@ -211,6 +211,38 @@ public sealed class RpcSourceGeneratorTests
 		system.Metrics.SendEnqueueFailureCount.Should().Be(1);
 	}
 
+	[Fact]
+	public async Task VoidProxy_ThrowingSendEnqueueFailedHandlerMustNotEscape()
+	{
+		// 回归防护：OnSendEnqueueFailed 运行在生成代理丢弃的 OnlyOnFaulted 续接里，
+		// handler 抛出的异常若逃逸会重新变成未观察任务异常（本钩子要消除的问题），
+		// 并且会跳过同一事件的后续 handler。抛异常的 handler 必须被吞掉（仅 Debug 日志），
+		// 后续 handler 与指标计数不受影响。
+		InProcTransport? transport = null;
+		await using var system = new ActorSystem(
+			transportFactory: sys => transport = new InProcTransport(sys,
+				new InProcTransportOptions { ShortCircuitLocalDelivery = false }));
+		var actor = await system.CreateActorAsync(() => new SlowActor(), "throwing-hook-target");
+
+		var throwingHandlerRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		system.SendEnqueueFailed += (_, _) =>
+		{
+			throwingHandlerRan.TrySetResult();
+			throw new InvalidOperationException("handler boom");
+		};
+
+		var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+		system.SendEnqueueFailed += (_, exception) => observed.TrySetResult(exception);
+
+		var proxy = actor.CreateProxy<ISlowActor>();
+		await transport!.DisposeAsync();
+		proxy.Fire("after");
+
+		await throwingHandlerRan.Task.WaitAsync(TimeSpan.FromSeconds(5));
+		(await observed.Task.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeOfType<ObjectDisposedException>();
+		system.Metrics.SendEnqueueFailureCount.Should().Be(1);
+	}
+
 	[SkynetActor("slow", Unique = true)]
 	public interface ISlowActor
 	{

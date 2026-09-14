@@ -16,6 +16,7 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly ConcurrentDictionary<long, string> _handleToName = new();
 	private readonly Lock _registryLock = new();
 	private readonly ILoggerFactory _loggerFactory;
+	private readonly ILogger _logger;
 	private readonly ITransport _transport;
 	private readonly bool _ownsTransport;
 	private readonly long _handleOffset;
@@ -44,6 +45,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		Func<ActorSystem, ITransport>? transportFactory = null)
 	{
 		_loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+		_logger = _loggerFactory.CreateLogger<ActorSystem>();
 		_handleOffset = options?.HandleOffset ?? 0;
 		_clusterRegistry = options?.ClusterRegistry;
 		Metrics = options?.MetricsCollector ?? new ActorMetricsCollector();
@@ -80,7 +82,28 @@ public sealed class ActorSystem : IAsyncDisposable
 	internal void OnSendEnqueueFailed(ActorRef actor, Exception exception)
 	{
 		Metrics.OnSendEnqueueFailed();
-		SendEnqueueFailed?.Invoke(actor, exception);
+		// A throwing handler must never escape — this method runs inside the generated proxy's
+		// OnlyOnFaulted continuation (a deliberately discarded task), so an escape would resurface
+		// as an unobserved task exception, the exact problem this hook exists to eliminate.
+		// Handlers are invoked individually so one throwing handler can neither escape nor skip
+		// the remaining handlers of the same event.
+		if (SendEnqueueFailed is not Action<ActorRef, Exception> handlers)
+		{
+			return;
+		}
+
+		foreach (var handler in handlers.GetInvocationList())
+		{
+			try
+			{
+				((Action<ActorRef, Exception>)handler)(actor, exception);
+			}
+			catch (Exception handlerEx)
+			{
+				_logger.LogDebug(handlerEx, "A SendEnqueueFailed handler threw while reporting a failed send of type {ExceptionType}.",
+					exception.GetType().Name);
+			}
+		}
 	}
 
 	/// <summary>
