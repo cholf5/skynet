@@ -5,7 +5,7 @@
 ## 总体架构
 Skynet 遵循“三层一体”的设计：
 1. **Core 层**：实现 Actor 生命周期、消息调度、序列化与指标采集。
-2. **Transport 层**：提供多种传输实现，包含 In-Proc 与 TCP，并支持自定义扩展。
+2. **Transport 层**：提供多种传输实现，包含 In-Proc 与 TCP，KCP/UDP 作为独立插件包 `Skynet.Transport.Kcp` 提供，并支持自定义扩展。
 3. **Integration 层**：面向业务系统的周边能力，如会话网关、房间管理、调试工具等。
 
 ```
@@ -14,7 +14,7 @@ Skynet 遵循“三层一体”的设计：
 ├────────────────────────────────────────────┤
 │           Skynet.Core (Actor Runtime)      │
 ├────────────────────────────────────────────┤
-│  InProc Transport  |  TCP Transport  | ... │
+│  InProc Transport | TCP | KCP Plugin | ...  │
 ├────────────────────────────────────────────┤
 │   Cluster Registry | Gate Server | Extras │
 └────────────────────────────────────────────┘
@@ -106,6 +106,8 @@ Skynet 遵循“三层一体”的设计：
 - `ITransport` 描述基础投递能力，包含 `SendAsync`、`CallAsync`、`DisposeAsync` 等方法。
 - `InProcTransport` 面向单进程开发，直接将消息投递到目标 Actor 的信箱中。
 - `TcpTransport` 通过连接池与心跳机制实现跨进程通信，并配合 `IClusterRegistry` 定位远程 Actor。
+- `KcpTransport`（独立插件包 `Skynet.Transport.Kcp`，仅依赖 `Skynet.Core`）提供基于 UDP 的
+  KCP 可靠有序传输，适用于对队头阻塞敏感的实时场景；详见 [docs/transport.md](transport.md)。
 
 ### Cluster Registry
 - `StaticClusterRegistry` 通过静态配置映射 Actor 与节点。

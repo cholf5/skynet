@@ -9,10 +9,13 @@ protocol-independent reliable layer introduced with C-9.
 | Transport | Underlying channel | Reliability | Typical use |
 |---|---|---|---|
 | `TcpTransport` (`Skynet.Cluster`) | TCP | Stream, kernel-managed | Default for cross-node RPC |
-| `KcpTransport` (`Skynet.Cluster`) | UDP + KCP (`Transport/Kcp/ThirdParty/kcp2k`) | Reliable, ordered, message-oriented | Real-time workloads (battle sync) where TCP head-of-line blocking hurts |
-| `ReliableQueue` (`Skynet.Cluster.Transport.Reliable`) | Any unreliable packet channel (usually UDP datagrams) | Sliding-window ARQ layer you stack yourself | Custom transports that get no reliability from their channel |
+| `KcpTransport` (`Skynet.Transport.Kcp`) | UDP + KCP (`ThirdParty/kcp2k`) | Reliable, ordered, message-oriented | Real-time workloads (battle sync) where TCP head-of-line blocking hurts |
+| `ReliableQueue` (`Skynet.Transport.Kcp.Reliable`) | Any unreliable packet channel (usually UDP datagrams) | Sliding-window ARQ layer you stack yourself | Custom transports that get no reliability from their channel |
 
-Both `TcpTransport` and `KcpTransport` implement the same `ITransport` semantics: local delivery
+`TcpTransport` ships with `Skynet.Cluster`; `KcpTransport` is a transport plugin package
+(`Skynet.Transport.Kcp`) that depends only on `Skynet.Core` — pull it in explicitly when a node
+needs KCP/UDP connectivity. Both `TcpTransport` and `KcpTransport` implement the same
+`ITransport` semantics: local delivery
 short-circuit, cluster-registry routing, pending-call tracking for `CallAsync`, fault envelopes, and
 heartbeat-based dead-peer detection. They are interchangeable from an `ActorSystem` perspective.
 
@@ -20,7 +23,7 @@ heartbeat-based dead-peer detection. They are interchangeable from an `ActorSyst
 
 `KcpTransport` runs one KCP session per remote node over a single UDP socket bound to the node's
 registry endpoint. It is built on a vendored copy of the kcp2k managed KCP state machine (MIT,
-see `src/Skynet.Cluster/Transport/Kcp/ThirdParty/kcp2k/`), isolated behind `KcpSession` so no
+see `src/Skynet.Transport.Kcp/ThirdParty/kcp2k/`), isolated behind `KcpSession` so no
 kcp2k type leaks into Skynet APIs.
 
 ### Wire layout
@@ -66,7 +69,7 @@ pending call routed to that node fails with `RemoteConnectionClosedException`, m
 
 ## ReliableQueue
 
-`Skynet.Cluster.Transport.Reliable.ReliableQueue` is a protocol-independent sliding-window ARQ
+`Skynet.Transport.Kcp.Reliable.ReliableQueue` is a protocol-independent sliding-window ARQ
 layer (~250 lines, zero dependencies beyond the BCL) for transports whose underlying channel is a
 raw unreliable packet pipe (typically UDP datagrams). It provides:
 
@@ -175,18 +178,18 @@ When a node receives an envelope whose payload contract id is not registered:
 
 ## Third-party notice
 
-`src/Skynet.Cluster/Transport/Kcp/ThirdParty/kcp2k/` contains the vendored managed KCP core from
+`src/Skynet.Transport.Kcp/ThirdParty/kcp2k/` contains the vendored managed KCP core from
 [kcp2k](https://github.com/MirrorNetworking/kcp2k), MIT licensed (see `LICENSE` and `NOTICE.md` in
 that directory). Only nullable-annotation-neutral vendored sources are included; no kcp2k namespace
-types are used outside the `Transport/Kcp` folder.
+types are used outside the vendored folder.
 
 ## Testing
 
-- `tests/Skynet.Core.Tests/Reliable/ReliableQueueTests.cs` — windowing, ack/una, reorder,
+- `tests/Skynet.Transport.Kcp.Tests/Reliable/ReliableQueueTests.cs` — windowing, ack/una, reorder,
   wraparound, fast resend, RTO adaptation, Karn sampling, dead-link terminal state, `Reset`, codec.
-- `tests/Skynet.Core.Tests/Reliable/ReliableLossyPipeTests.cs` — two queues wired through a seeded
-  fake channel with injectable drop/delay/reorder driven by a virtual clock: 5% and 20% drop
+- `tests/Skynet.Transport.Kcp.Tests/Reliable/ReliableLossyPipeTests.cs` — two queues wired through
+  a seeded fake channel with injectable drop/delay/reorder driven by a virtual clock: 5% and 20% drop
   end-to-end in-order delivery, plus a black-hole dead-link scenario.
-- `tests/Skynet.Core.Tests/KcpTransportTests.cs` — cross-node `CallAsync`, fire-and-forget
+- `tests/Skynet.Transport.Kcp.Tests/KcpTransportTests.cs` — cross-node `CallAsync`, fire-and-forget
   `SendAsync`, and source-generated RPC proxy roundtrips over `KcpTransport`, mirroring
   `TcpTransportTests`.

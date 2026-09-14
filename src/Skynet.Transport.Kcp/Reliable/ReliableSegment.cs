@@ -1,4 +1,4 @@
-namespace Skynet.Cluster.Transport.Reliable;
+namespace Skynet.Transport.Kcp.Reliable;
 
 /// <summary>
 /// Represents one unacknowledged outgoing message tracked by a <see cref="ReliableQueue"/>.

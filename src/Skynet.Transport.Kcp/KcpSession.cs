@@ -1,6 +1,6 @@
 using kcp2k;
 
-namespace Skynet.Cluster.Transport.Kcp;
+namespace Skynet.Transport.Kcp;
 
 /// <summary>
 /// Isolates the vendored kcp2k state machine behind a minimal wrapper so the rest of the

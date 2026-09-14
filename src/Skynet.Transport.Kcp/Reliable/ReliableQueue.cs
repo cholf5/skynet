@@ -1,4 +1,4 @@
-namespace Skynet.Cluster.Transport.Reliable;
+namespace Skynet.Transport.Kcp.Reliable;
 
 /// <summary>
 /// Provides a protocol-independent sliding-window layer that delivers messages reliably and in

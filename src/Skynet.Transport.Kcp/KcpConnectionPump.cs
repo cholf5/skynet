@@ -1,6 +1,6 @@
 using System.Threading.Channels;
 
-namespace Skynet.Cluster.Transport.Kcp;
+namespace Skynet.Transport.Kcp;
 
 /// <summary>
 /// Serializes all KCP state-machine work for one connection onto a single driving loop.

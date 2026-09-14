@@ -6,12 +6,12 @@ using FluentAssertions;
 using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
-using Skynet.Cluster.Transport.Kcp;
 using Skynet.Core;
 using Skynet.Core.Serialization;
+using Skynet.Transport.Kcp;
 using Xunit;
 
-namespace Skynet.Core.Tests;
+namespace Skynet.Transport.Kcp.Tests;
 
 public sealed class KcpTransportTests
 {
@@ -453,6 +453,51 @@ public sealed class KcpTransportTests
 		await SendJunkDatagramAsync(source, port2, 777777);
 		await WaitForConditionAsync(() => transport2._sessionsByConv.ContainsKey(777777),
 			TimeSpan.FromSeconds(5), "unknown non-retired conversations must still create sessions");
+	}
+
+	[Fact]
+	public async Task RouteDatagram_ShouldResurrectClosedConversationWhenRetirementDisabled()
+	{
+		// RetiredConversationRetention = TimeSpan.Zero opts out of conversation retirement: a late
+		// datagram for a closed conversation may create a fresh inbound session again.
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+		await system1.CreateActorAsync(() => new KcpEchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, new KcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromMilliseconds(250),
+				IntervalMilliseconds = 10,
+				RetiredConversationRetention = TimeSpan.Zero
+			}, NullLoggerFactory.Instance));
+
+		// Establish the session, then close it locally.
+		var remote = system2.GetByName("echo");
+		(await remote.CallAsync<string>(new KcpEchoRequest("warmup"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:warmup");
+		var connection = transport2!._connections["node1"];
+		await connection.DisposeAsync();
+		await WaitForConditionAsync(() => transport2._sessionsByConv.IsEmpty, TimeSpan.FromSeconds(5),
+			"the disposed session must be removed before the resurrection attempt");
+
+		// With retirement disabled, the late datagram for the closed conversation must create a
+		// new inbound session instead of being dropped by the retirement rule.
+		using var source = new UdpClient();
+		var closedConversationId = connection.ConversationId;
+		await SendJunkDatagramAsync(source, port2, closedConversationId);
+		await WaitForConditionAsync(() => transport2._sessionsByConv.ContainsKey(closedConversationId),
+			TimeSpan.FromSeconds(5),
+			"with retirement disabled a late datagram must be allowed to recreate the session");
 	}
 
 	[Fact]

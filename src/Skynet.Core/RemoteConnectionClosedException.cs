@@ -1,4 +1,4 @@
-namespace Skynet.Cluster;
+namespace Skynet.Core;
 
 /// <summary>
 /// Represents the failure of a pending remote call because the connection to the remote node was

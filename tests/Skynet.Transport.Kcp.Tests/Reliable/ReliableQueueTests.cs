@@ -1,8 +1,8 @@
 using FluentAssertions;
-using Skynet.Cluster.Transport.Reliable;
+using Skynet.Transport.Kcp.Reliable;
 using Xunit;
 
-namespace Skynet.Core.Tests.Reliable;
+namespace Skynet.Transport.Kcp.Tests.Reliable;
 
 public sealed class ReliableQueueTests
 {
