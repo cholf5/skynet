@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using MessagePack;
 
 namespace Skynet.Core.Serialization;
@@ -109,6 +110,47 @@ public static class MessageEnvelopeSerializer
 	public static MessageEnvelope Deserialize(ReadOnlyMemory<byte> buffer, MessagePackSerializerOptions? options = null)
 	{
 		options ??= MessagePackSerializerOptions.Standard;
+		var (envelope, unknownContractId) = DeserializeCore(buffer, options);
+		if (unknownContractId != PayloadContractRegistry.NullPayloadContractId)
+		{
+			throw new UnknownPayloadContractException(unknownContractId);
+		}
+
+		return envelope;
+	}
+
+	/// <summary>
+	/// Attempts to deserialize an envelope without throwing for unknown payload contract ids.
+	/// Returns <see langword="true"/> with <paramref name="envelope"/> set when the frame parsed;
+	/// in that case <paramref name="unknownPayloadContractId"/> is
+	/// <see cref="PayloadContractRegistry.NullPayloadContractId"/> for a fully resolved envelope,
+	/// or the unresolvable contract id (with a <see langword="null"/> envelope payload) when the
+	/// frame carries a payload type this node does not know — the caller must not dispatch such an
+	/// envelope and may use it to build a fault response. Returns <see langword="false"/> when the
+	/// frame is unparseable (malformed envelope bytes, or payload bytes that do not fit the
+	/// resolved type); the caller must drop the frame. Legacy wire versions still throw
+	/// <see cref="NotSupportedException"/> so mixed-version clusters keep failing loudly.
+	/// </summary>
+	public static bool TryDeserialize(ReadOnlyMemory<byte> buffer, [NotNullWhen(true)] out MessageEnvelope? envelope,
+		out int unknownPayloadContractId, MessagePackSerializerOptions? options = null)
+	{
+		options ??= MessagePackSerializerOptions.Standard;
+		try
+		{
+			(envelope, unknownPayloadContractId) = DeserializeCore(buffer, options);
+			return true;
+		}
+		catch (MessagePackSerializationException)
+		{
+			envelope = null;
+			unknownPayloadContractId = PayloadContractRegistry.NullPayloadContractId;
+			return false;
+		}
+	}
+
+	private static (MessageEnvelope Envelope, int UnknownContractId) DeserializeCore(
+		ReadOnlyMemory<byte> buffer, MessagePackSerializerOptions options)
+	{
 		SerializedMessageEnvelope dto;
 		try
 		{
@@ -130,6 +172,7 @@ public static class MessageEnvelopeSerializer
 		}
 
 		object? payload;
+		int unknownContractId = PayloadContractRegistry.NullPayloadContractId;
 		if (dto.PayloadContractId == PayloadContractRegistry.NullPayloadContractId)
 		{
 			payload = null;
@@ -138,7 +181,10 @@ public static class MessageEnvelopeSerializer
 		{
 			// Never fall back to Type.GetType: unknown contract ids must fail loudly so version
 			// drift between nodes surfaces as an explicit error instead of arbitrary type loading.
-			throw new UnknownPayloadContractException(dto.PayloadContractId);
+			// Deserialize() surfaces this as an exception; TryDeserialize() returns the id so the
+			// transport can answer the caller with a fault (see UnknownPayloadContractException).
+			unknownContractId = dto.PayloadContractId;
+			payload = null;
 		}
 		else
 		{
@@ -148,7 +194,7 @@ public static class MessageEnvelopeSerializer
 		var timestamp = new DateTimeOffset(dto.Timestamp, TimeSpan.Zero);
 		TimeSpan? ttl = dto.TimeToLiveTicks.HasValue ? TimeSpan.FromTicks(dto.TimeToLiveTicks.Value) : null;
 
-		return new MessageEnvelope(
+		return (new MessageEnvelope(
 			dto.MessageId,
 			new ActorHandle(dto.From),
 			new ActorHandle(dto.To),
@@ -158,7 +204,7 @@ public static class MessageEnvelopeSerializer
 			timestamp,
 			ttl,
 			dto.Version,
-			dto.IsResponse);
+			dto.IsResponse), unknownContractId);
 	}
 
 	/// <summary>

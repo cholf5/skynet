@@ -479,6 +479,46 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		}
 	}
 
+	/// <summary>
+	/// Handles an envelope whose payload contract id is not registered on this node. Request frames
+	/// that expect a response (<c>CallType.Call</c>) are answered with a <see cref="RemoteCallFault"/>
+	/// so the caller's pending call fails at RTT speed instead of hanging until the connection dies;
+	/// every other frame is silently dropped. Response frames are never answered: a fault we cannot
+	/// read must not trigger another fault, or two peers with mismatched contract sets would loop
+	/// forever on each other's fault responses.
+	/// </summary>
+	internal async Task HandleUnknownPayloadContractAsync(TcpConnection connection, MessageEnvelope request,
+		int contractId)
+	{
+		_logger.LogError(
+			"Rejected envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
+			connection.RemoteNodeId, contractId);
+
+		if (request.IsResponse || request.CallType != CallType.Call)
+		{
+			// Fire-and-forget requests leave no pending call on the peer to fail fast, and
+			// answering a response (possibly an unreadable fault) would create a fault loop.
+			return;
+		}
+
+		var fault = new RemoteCallFault(
+			IsCancellation: false,
+			ExceptionType: typeof(UnknownPayloadContractException).FullName ?? "UnknownPayloadContractException",
+			Message: $"Payload contract id {contractId} is not registered on this node; the request was dropped. " +
+				"Ensure all nodes share the same contract assembly and register the payload type.");
+		try
+		{
+			await connection.SendEnvelopeAsync(request.WithResponse(fault), CancellationToken.None)
+				.ConfigureAwait(false);
+		}
+		catch (Exception exception)
+		{
+			_logger.LogWarning(exception,
+				"Failed to transmit the unknown-contract fault for message {MessageId} to node {NodeId}.",
+				request.MessageId, connection.RemoteNodeId);
+		}
+	}
+
 	/// <inheritdoc />
 	public async ValueTask DisposeAsync()
 	{
@@ -668,18 +708,33 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					switch (type)
 					{
 						case FrameType.Envelope:
-							MessageEnvelope envelope;
-							try
+							MessageEnvelope? envelope;
+							int unknownContractId;
+							// Unparseable frames return false (dropped below); unknown payload
+							// contract ids come back through unknownContractId. Legacy wire versions
+							// throw NotSupportedException, which tears the connection down — mixed
+							// version clusters must keep failing loudly.
+							if (!MessageEnvelopeSerializer.TryDeserialize(payload, out envelope,
+								out unknownContractId, _serializerOptions))
 							{
-								envelope = MessageEnvelopeSerializer.Deserialize(payload, _serializerOptions);
+								// The frame is unparseable (it may itself be the peer's fault
+								// response). Drop it and keep the connection alive; never reply
+								// to a frame we could not read — that would create a fault loop
+								// with a peer that also cannot parse our reply.
+								_logger.LogWarning(
+									"Dropped an unparseable envelope frame from node {NodeId}.",
+									_remoteNodeId);
+								continue;
 							}
-							catch (UnknownPayloadContractException ex)
+
+							if (unknownContractId != PayloadContractRegistry.NullPayloadContractId)
 							{
 								// A peer with a different contract set sent an unknown payload id.
-								// Reject the frame but keep the connection alive for future traffic.
-								_logger.LogError(ex,
-									"Rejected envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
-									_remoteNodeId, ex.ContractId);
+								// Reject the frame but keep the connection alive for future traffic;
+								// requests that expect a response are answered with a fault so the
+								// caller fails fast instead of hanging until disconnect.
+								await _transport.HandleUnknownPayloadContractAsync(this, envelope,
+									unknownContractId).ConfigureAwait(false);
 								continue;
 							}
 

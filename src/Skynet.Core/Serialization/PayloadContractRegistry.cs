@@ -149,6 +149,15 @@ public static class PayloadContractRegistry
 			throw new ArgumentException(
 				$"Payload type '{payloadType}' has no full name (e.g. open generic or byref types are not supported).",
 				nameof(payloadType));
+		if (EmbedsGenericTypeArguments(payloadType))
+		{
+			// The contract id is the FNV-1a hash of the full name. A full name that embeds
+			// assembly-qualified generic arguments (with runtime version, culture, public key)
+			// hashes differently per runtime/TFM, so nodes would silently disagree on the id.
+			// Reject at registration (startup for generated contracts, first send otherwise).
+			throw new PayloadContractTypeNotSupportedException(fullName);
+		}
+
 		var contractId = contractIdOverride ?? ComputeContractId(fullName);
 
 		lock (SyncRoot)
@@ -179,6 +188,36 @@ public static class PayloadContractRegistry
 			TypesById[contractId] = payloadType;
 			ContractIdsByType[payloadType] = contractId;
 		}
+	}
+
+	/// <summary>
+	/// Determines whether the type's <see cref="Type.FullName"/> embeds assembly-qualified generic
+	/// arguments. True for constructed generic types (<c>List&lt;int&gt;</c>), arrays of them
+	/// (<c>List&lt;int&gt;[]</c> — the array type itself is not generic, but its full name still
+	/// carries the element's generic arguments), and non-generic types nested inside constructed
+	/// generics (<c>Outer&lt;int&gt;.Inner</c>). Verified against the .NET runtime: even generic
+	/// arguments from the payload's own assembly are embedded with <c>Version=</c>, so such names
+	/// cannot hash stably across runtime versions or TFMs. Plain named types, arrays of them
+	/// (<c>byte[]</c>), nested types (<c>Outer+Inner</c>), and enums are always allowed.
+	/// </summary>
+	internal static bool EmbedsGenericTypeArguments(Type payloadType)
+	{
+		for (var current = payloadType; current is not null; current = current.DeclaringType)
+		{
+			// Unwrap arrays (including jagged/multi-dimensional): the element type carries the
+			// generic arguments embedded in the array's full name.
+			while (current.IsArray)
+			{
+				current = current.GetElementType()!;
+			}
+
+			if (current.IsConstructedGenericType)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	private static int Fnv1a32(byte[] data)
