@@ -71,7 +71,9 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// Raised when a generated void (send) proxy observes that a fire-and-forget enqueue failed
 	/// (e.g. the transport was disposed or the enqueue was canceled). The send path never throws
 	/// to its caller, so this hook — together with the <see cref="ActorMetricsCollector"/> send
-	/// failure counter — is the only way to observe such failures.
+	/// failure counter — is the only way to observe such failures. Handlers may fire concurrently
+	/// on the thread pool (each faulted enqueue runs its own OnlyOnFaulted continuation), so
+	/// handler implementations must be thread-safe.
 	/// </summary>
 	public event Action<ActorRef, Exception>? SendEnqueueFailed;
 
