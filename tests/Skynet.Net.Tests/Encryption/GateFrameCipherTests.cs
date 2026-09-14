@@ -71,11 +71,11 @@ public sealed class GateFrameCipherTests
 		using var cipher = SessionFrameCipherFactory.Create(TestCipherId, key);
 		var plaintext = "business frame payload"u8.ToArray();
 
-		var frame = GateFrameCodec.EncryptFrame(cipher, plaintext);
+		var frame = GateFrameCodec.EncryptFrame(cipher, plaintext, 0);
 		var decrypted = GateFrameCodec.DecryptFrame(cipher, frame);
 
 		decrypted.Should().Equal(plaintext);
-		frame.Length.Should().Be(cipher.NonceSizeBytes + plaintext.Length + cipher.TagSizeBytes);
+		frame.Length.Should().Be(GateFrameCodec.SequenceByteLength + cipher.NonceSizeBytes + plaintext.Length + cipher.TagSizeBytes);
 	}
 
 	[Fact]

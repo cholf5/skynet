@@ -22,11 +22,11 @@ public interface ISessionFrameCipher : IDisposable
 	/// <summary>Gets the authentication tag length in bytes.</summary>
 	int TagSizeBytes { get; }
 
-	/// <summary>Encrypts <paramref name="plaintext"/> into <paramref name="ciphertext"/> plus <paramref name="tag"/>.</summary>
-	void Encrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag);
+	/// <summary>Encrypts <paramref name="plaintext"/> into <paramref name="ciphertext"/> plus <paramref name="tag"/>, authenticating <paramref name="associatedData"/> without encrypting it.</summary>
+	void Encrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag, ReadOnlySpan<byte> associatedData = default);
 
-	/// <summary>Decrypts <paramref name="ciphertext"/> plus <paramref name="tag"/> into <paramref name="plaintext"/>.</summary>
-	void Decrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext);
+	/// <summary>Decrypts <paramref name="ciphertext"/> plus <paramref name="tag"/> into <paramref name="plaintext"/>. Throws <see cref="CryptographicException"/> when the tag or <paramref name="associatedData"/> does not match.</summary>
+	void Decrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext, ReadOnlySpan<byte> associatedData = default);
 }
 
 /// <summary>
@@ -62,15 +62,15 @@ public sealed class AesGcmSessionFrameCipher : ISessionFrameCipher, IDisposable
 	public int TagSizeBytes => TagSize;
 
 	/// <inheritdoc />
-	public void Encrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag)
+	public void Encrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag, ReadOnlySpan<byte> associatedData = default)
 	{
-		_aes.Encrypt(nonce, plaintext, ciphertext, tag);
+		_aes.Encrypt(nonce, plaintext, ciphertext, tag, associatedData);
 	}
 
 	/// <inheritdoc />
-	public void Decrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext)
+	public void Decrypt(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext, ReadOnlySpan<byte> associatedData = default)
 	{
-		_aes.Decrypt(nonce, ciphertext, tag, plaintext);
+		_aes.Decrypt(nonce, ciphertext, tag, plaintext, associatedData);
 	}
 
 	public void Dispose()

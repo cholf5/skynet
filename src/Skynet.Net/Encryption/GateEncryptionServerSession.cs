@@ -22,7 +22,8 @@ public sealed class GateEncryptionServerSession
 	private readonly Func<DateTimeOffset> _clock;
 	private byte[]? _pendingToken;
 	private long _pendingExpireUnixMs;
-	private byte[]? _sessionKey;
+	private byte[]? _clientToGateKey;
+	private byte[]? _gateToClientKey;
 
 	/// <summary>
 	/// Creates a server handshake session. Defaults follow the modernized protocol: OAEP-SHA256 padding,
@@ -55,11 +56,14 @@ public sealed class GateEncryptionServerSession
 	/// <summary>Gets the cipher id announced in the ConfirmEncryptKeyAck frame.</summary>
 	public byte CipherId => _cipherId;
 
-	/// <summary>Gets the session key after a successful <see cref="ProcessConfirmEncryptKey"/>; otherwise null.</summary>
-	public byte[]? SessionKey => _sessionKey;
+	/// <summary>Gets the key protecting client → gate traffic (the gate decrypts inbound frames with it); null before the handshake completed.</summary>
+	public byte[]? ClientToGateKey => _clientToGateKey;
+
+	/// <summary>Gets the key protecting gate → client traffic (the gate encrypts outbound frames with it); null before the handshake completed.</summary>
+	public byte[]? GateToClientKey => _gateToClientKey;
 
 	/// <summary>Gets a value indicating whether the handshake has completed successfully.</summary>
-	public bool IsCompleted => _sessionKey is not null;
+	public bool IsCompleted => _clientToGateKey is not null;
 
 	/// <summary>
 	/// Mints a fresh token, remembers it and returns it for the ResponseEncryptToken frame. Throws
@@ -68,7 +72,7 @@ public sealed class GateEncryptionServerSession
 	/// </summary>
 	public GateEncryptionToken IssueToken()
 	{
-		if (_sessionKey is not null)
+		if (_clientToGateKey is not null)
 		{
 			throw new GateHandshakeException(GateHandshakeErrors.DuplicateHandshake, "Gate encryption handshake already completed for this connection.");
 		}
@@ -82,11 +86,12 @@ public sealed class GateEncryptionServerSession
 
 	/// <summary>
 	/// Decrypts an inbound ConfirmEncryptKey frame body (opaque RSA ciphertext), validates the echoed token
-	/// against the token issued by <see cref="IssueToken"/>, derives the session key and returns it. Throws
+	/// against the token issued by <see cref="IssueToken"/> and derives both directional session keys
+	/// (available via <see cref="ClientToGateKey"/> and <see cref="GateToClientKey"/>). Throws
 	/// <see cref="GateHandshakeException"/> with a stable code on any validation failure so the gate can
 	/// close the connection with a diagnosable error.
 	/// </summary>
-	public byte[] ProcessConfirmEncryptKey(ReadOnlySpan<byte> ciphertext)
+	public void ProcessConfirmEncryptKey(ReadOnlySpan<byte> ciphertext)
 	{
 		if (_pendingToken is null)
 		{
@@ -126,8 +131,8 @@ public sealed class GateEncryptionServerSession
 			throw new GateHandshakeException(GateHandshakeErrors.InvalidToken, "Gate ConfirmEncryptKey echoed a token that does not match the one issued for this connection.");
 		}
 
-		_sessionKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt);
+		_clientToGateKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt, GateKeyDirection.ClientToGate);
+		_gateToClientKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt, GateKeyDirection.GateToClient);
 		_pendingToken = null;
-		return _sessionKey;
 	}
 }

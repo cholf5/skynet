@@ -16,8 +16,12 @@ public sealed class GateEncryptionClientSession
 	private readonly byte[]? _hkdfSalt;
 	private readonly byte _cipherId;
 	private readonly TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-	private byte[]? _sessionKey;
-	private ISessionFrameCipher? _frameCipher;
+	private readonly GateReplayWindow _receiveWindow = new();
+	private byte[]? _clientToGateKey;
+	private byte[]? _gateToClientKey;
+	private ISessionFrameCipher? _sendCipher;
+	private ISessionFrameCipher? _receiveCipher;
+	private ulong _sendSequence;
 
 	/// <summary>
 	/// Creates a client handshake session. Defaults follow the modernized protocol: OAEP-SHA256 padding,
@@ -38,9 +42,6 @@ public sealed class GateEncryptionClientSession
 		_cipherId = cipherId;
 	}
 
-	/// <summary>Gets the session key derived from the seed; null until <see cref="ProcessResponseToken"/> ran.</summary>
-	public byte[]? SessionKey => _sessionKey;
-
 	/// <summary>
 	/// Gets the token expiry (unix milliseconds, as announced by the gate) decoded from the
 	/// ResponseEncryptToken frame; null before that frame arrived. Informational only: the client
@@ -49,8 +50,18 @@ public sealed class GateEncryptionClientSession
 	/// </summary>
 	public long? TokenExpireUnixMs { get; private set; }
 
-	/// <summary>Gets the frame cipher for business frames; null until the handshake completed.</summary>
-	public ISessionFrameCipher? FrameCipher => _frameCipher;
+	/// <summary>Gets the client → gate key derived from the seed; null until <see cref="ProcessResponseToken"/> ran.</summary>
+	public byte[]? ClientToGateKey => _clientToGateKey;
+
+	/// <summary>Gets the gate → client key derived from the seed; null until <see cref="ProcessResponseToken"/> ran.</summary>
+	public byte[]? GateToClientKey => _gateToClientKey;
+
+	/// <summary>
+	/// Gets the cipher used to encrypt outbound (client → gate) business frames; null until the handshake
+	/// completed. Prefer the <see cref="EncryptOutbound"/>/<see cref="DecryptInbound"/> helpers, which also
+	/// maintain the frame sequence numbers and the replay window.
+	/// </summary>
+	public ISessionFrameCipher? FrameCipher => _sendCipher;
 
 	/// <summary>Gets a value indicating whether the handshake completed successfully.</summary>
 	public bool IsCompleted => _completion.Task.Status == TaskStatus.RanToCompletion;
@@ -71,7 +82,7 @@ public sealed class GateEncryptionClientSession
 	/// </summary>
 	public byte[] ProcessResponseToken(ReadOnlySpan<byte> frame)
 	{
-		if (_sessionKey is not null)
+		if (_clientToGateKey is not null)
 		{
 			throw new GateHandshakeException(GateHandshakeErrors.DuplicateResponse, "Gate ResponseEncryptToken received more than once for the same connection.");
 		}
@@ -79,7 +90,10 @@ public sealed class GateEncryptionClientSession
 		var token = GateFrameCodec.DecodeResponseToken(frame);
 		TokenExpireUnixMs = token.ExpireUnixMs;
 		var seed = _randomSource.GetSeedBytes(GateHandshakeCodec.SeedByteLength);
-		_sessionKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt);
+		_clientToGateKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt, GateKeyDirection.ClientToGate);
+		_gateToClientKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt, GateKeyDirection.GateToClient);
+		_sendCipher = SessionFrameCipherFactory.Create(_cipherId, _clientToGateKey);
+		_receiveCipher = SessionFrameCipherFactory.Create(_cipherId, _gateToClientKey);
 
 		byte[] ciphertext;
 		try
@@ -90,7 +104,13 @@ public sealed class GateEncryptionClientSession
 		}
 		catch (CryptographicException ex)
 		{
-			_sessionKey = null;
+			// The handshake is unrecoverable; release the AEAD instances created before the failure.
+			_sendCipher?.Dispose();
+			_receiveCipher?.Dispose();
+			_sendCipher = null;
+			_receiveCipher = null;
+			_clientToGateKey = null;
+			_gateToClientKey = null;
 			throw new GateHandshakeException(GateHandshakeErrors.RsaEncryptFailed, "Gate ConfirmEncryptKey could not be RSA-encrypted: " + ex.Message);
 		}
 
@@ -99,22 +119,22 @@ public sealed class GateEncryptionClientSession
 
 	/// <summary>
 	/// Consumes the inbound encrypted ConfirmEncryptKeyAck frame. Successful decryption confirms the gate
-	/// derived the same session key and completes <see cref="Completion"/>; <see cref="FrameCipher"/> becomes
-	/// available for business frames afterwards.
+	/// derived the same directional keys and completes <see cref="Completion"/>; <see cref="FrameCipher"/>
+	/// becomes available for business frames afterwards. The ack is the first gate → client frame and goes
+	/// through the receive replay window.
 	/// </summary>
 	public void ProcessConfirmAck(ReadOnlySpan<byte> frame)
 	{
-		if (_sessionKey is null)
+		if (_clientToGateKey is null)
 		{
 			Fail(new GateHandshakeException(GateHandshakeErrors.AckWithoutKey, "Gate ConfirmEncryptKeyAck arrived before a session key was derived."));
 			return;
 		}
 
-		var cipher = _frameCipher ??= SessionFrameCipherFactory.Create(_cipherId, _sessionKey);
 		byte[] plaintext;
 		try
 		{
-			plaintext = GateFrameCodec.DecryptFrame(cipher, frame);
+			plaintext = GateFrameCodec.DecryptFrame(_receiveCipher!, frame, _receiveWindow);
 		}
 		catch (CryptographicException ex)
 		{
@@ -135,5 +155,35 @@ public sealed class GateEncryptionClientSession
 	public void Fail(Exception? exception)
 	{
 		_completion.TrySetException(exception ?? new InvalidOperationException("Gate handshake aborted."));
+	}
+
+	/// <summary>
+	/// Encrypts one outbound business frame with the client → gate key, stamping the next send sequence
+	/// number. Throws <see cref="InvalidOperationException"/> when the handshake has not completed.
+	/// </summary>
+	public byte[] EncryptOutbound(ReadOnlySpan<byte> plaintext)
+	{
+		if (_sendCipher is null)
+		{
+			throw new InvalidOperationException("The encryption handshake has not completed; business frames cannot be sent yet.");
+		}
+
+		var frame = GateFrameCodec.EncryptFrame(_sendCipher, plaintext, _sendSequence++);
+		return frame;
+	}
+
+	/// <summary>
+	/// Decrypts one inbound (gate → client) business frame with the gate → client key through the receive
+	/// replay window. Throws <see cref="CryptographicException"/> when the frame is malformed, a replay, or
+	/// fails authentication.
+	/// </summary>
+	public byte[] DecryptInbound(byte[] frame)
+	{
+		if (_receiveCipher is null)
+		{
+			throw new InvalidOperationException("The encryption handshake has not completed; business frames cannot be received yet.");
+		}
+
+		return GateFrameCodec.DecryptFrame(_receiveCipher, frame, _receiveWindow);
 	}
 }
