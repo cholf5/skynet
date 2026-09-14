@@ -10,7 +10,7 @@
 - [ ] [E-4 跨节点 TLS（TcpTransport 可选 SslStream 加密）](issues/E-4-tcp-transport-tls.md) — Owner: AI Agent — Complexity: M
 
 ## To Do
-- [ ] [E-3 Benchmark 工程 + 基线压测报告](issues/E-3-benchmark-baseline.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## In Progress
 - _None_
@@ -25,6 +25,9 @@
 - _None_
 
 ## Done
+- [x] [E-3 Benchmark 工程 + 基线压测报告](issues/E-3-benchmark-baseline.md) — Owner: AI Agent — Complexity: M
+- [x] [E-2 Prometheus 指标导出插件](issues/E-2-prometheus-metrics-exporter.md) — Owner: AI Agent — Complexity: M
+- [x] [E-1 Gate 限流 hook（连接准入 + 入站帧限速）](issues/E-1-gate-rate-limiting.md) — Owner: AI Agent — Complexity: S
 - [x] [D-5 Gate 加密：重放防护与方向密钥分离](issues/D-5-gate-crypto-replay-hardening.md) — Owner: AI Agent — Complexity: M
 - [x] [D-8 KCP 传输拆分为独立工程 Skynet.Transport.Kcp](issues/D-8-split-kcp-transport-project.md) — Owner: AI Agent — Complexity: S
 - [x] [D-7 P2 零散修复批（17 项）](issues/D-7-p2-batch-fixes.md) — Owner: AI Agent — Complexity: S
