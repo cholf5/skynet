@@ -11,10 +11,9 @@
 
 ## To Do
 - [ ] [E-3 Benchmark 工程 + 基线压测报告](issues/E-3-benchmark-baseline.md) — Owner: AI Agent — Complexity: M
-- [ ] [E-2 Prometheus 指标导出插件](issues/E-2-prometheus-metrics-exporter.md) — Owner: AI Agent — Complexity: M
 
 ## In Progress
-- [ ] [E-1 Gate 限流 hook（连接准入 + 入站帧限速）](issues/E-1-gate-rate-limiting.md) — Owner: AI Agent — Complexity: S
+- [ ] [E-2 Prometheus 指标导出插件](issues/E-2-prometheus-metrics-exporter.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
 - _None_
