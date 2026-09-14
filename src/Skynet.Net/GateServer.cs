@@ -395,6 +395,7 @@ public sealed class GateServer : IAsyncDisposable
 		Func<CancellationToken, ValueTask<InboundFrame>> readFrameAsync, CancellationToken cancellationToken)
 	{
 		var pipeline = CreatePipeline();
+		var rateLimiter = _options.RateLimiter;
 		var lifetime = new SessionLifetimeState();
 		using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 		SessionCloseReason closeReason = SessionCloseReason.ClientDisconnected;
@@ -402,6 +403,19 @@ public sealed class GateServer : IAsyncDisposable
 
 		try
 		{
+			if (rateLimiter is not null)
+			{
+				var admission = rateLimiter.EvaluateConnection(metadata);
+				if (admission == GateRateLimitDecision.Close)
+				{
+					closeReason = SessionCloseReason.ProtocolViolation;
+					description = "Connection rejected by the rate limiter.";
+					_logger.LogInformation("Session {SessionId} from {RemoteEndPoint} rejected by the rate limiter.",
+						metadata.SessionId, metadata.RemoteEndPoint);
+					return;
+				}
+			}
+
 			if (!pipeline.RequiresHandshake && !await RunAuthenticationAsync(metadata, null, cancellationToken)
 					.ConfigureAwait(false))
 			{
@@ -435,6 +449,27 @@ public sealed class GateServer : IAsyncDisposable
 					break;
 				}
 
+				if (rateLimiter is not null)
+				{
+					var decision = rateLimiter.EvaluateInboundFrame(metadata, frame.Payload.Length);
+					if (decision == GateRateLimitDecision.Close)
+					{
+						closeReason = SessionCloseReason.ProtocolViolation;
+						description = "Inbound frame rate limit exceeded.";
+						_logger.LogWarning("Session {SessionId} closed: inbound frame rate limit exceeded.", metadata.SessionId);
+						break;
+					}
+
+					if (decision == GateRateLimitDecision.Drop)
+					{
+						_logger.LogDebug("Session {SessionId} dropped an inbound frame of {Bytes} bytes: rate limited.",
+							metadata.SessionId, frame.Payload.Length);
+						continue;
+					}
+				}
+
+				// Only frames accepted by the rate limiter count as activity, otherwise dropped
+				// junk traffic would keep a session alive past the idle timeout.
 				connection.MarkActivity();
 
 				if (!pipeline.IsReadyForBusiness)
@@ -478,6 +513,8 @@ public sealed class GateServer : IAsyncDisposable
 		}
 		finally
 		{
+			rateLimiter?.OnSessionClosed(metadata.SessionId);
+
 			if (lifetime.Runtime is not null)
 			{
 				_sessions.TryRemove(metadata.SessionId, out _);
