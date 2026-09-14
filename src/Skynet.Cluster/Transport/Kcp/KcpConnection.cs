@@ -166,24 +166,26 @@ internal sealed class KcpConnection : IAsyncDisposable
 
 	private async Task InboundHandshakeWatchdogAsync(CancellationToken cancellationToken)
 	{
-		try
+		// Race-free form: whichever of the handshake task and the timeout completes first wins.
+		// The previous "delay then check IsCompleted" left a check-then-act window in which a
+		// handshake completing between the check and the Dispose would get its session killed.
+		var completed = await Task.WhenAny(
+			_handshakeCompleted.Task,
+			Task.Delay(Options.InboundHandshakeTimeout, cancellationToken)).ConfigureAwait(false);
+		if (completed != _handshakeCompleted.Task)
 		{
-			await Task.Delay(Options.InboundHandshakeTimeout, cancellationToken).ConfigureAwait(false);
-		}
-		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-		{
-			return;
-		}
+			if (cancellationToken.IsCancellationRequested)
+			{
+				// The session/transport shut down before the handshake arrived; teardown is
+				// already handled by the cancellation path.
+				return;
+			}
 
-		if (_handshakeCompleted.Task.IsCompleted)
-		{
-			return;
+			_logger.LogWarning(
+				"Inbound KCP session from {EndPoint} did not complete its handshake within {Timeout}; closing the session.",
+				RemoteEndPoint, Options.InboundHandshakeTimeout);
+			await DisposeAsync().ConfigureAwait(false);
 		}
-
-		_logger.LogWarning(
-			"Inbound KCP session from {EndPoint} did not complete its handshake within {Timeout}; closing the session.",
-			RemoteEndPoint, Options.InboundHandshakeTimeout);
-		await DisposeAsync().ConfigureAwait(false);
 	}
 
 	/// <summary>

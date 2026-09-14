@@ -166,7 +166,9 @@ public sealed class KcpTransportTests
 
 		var callTask = system2.GetByName("slow").CallAsync<string>(new KcpEchoRequest("ping"),
 			TimeSpan.FromSeconds(30));
-		await Task.Delay(200); // Let the pending call register and its envelope go out.
+		// Event-driven: wait until the pending call has actually registered and its envelope is out.
+		await WaitForConditionAsync(() => transport2!._pendingCalls.Count == 1, TimeSpan.FromSeconds(5),
+			"the pending call must register before the dead link is forced");
 
 		// White-box: force the vendored KCP state machine into its dead-link terminal state.
 		ForceKcpDeadLink(transport2!._connections["node1"]);
@@ -191,7 +193,11 @@ public sealed class KcpTransportTests
 		var configuration = CreateConfiguration(port1, port2);
 
 		var registry1 = new StaticClusterRegistry(configuration, "node1");
-		await using var system1 = CreateSystem(configuration, "node1");
+		var loggerFactory1 = new RecordingLoggerFactory();
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => new KcpTransport(sys, registry1, CreateTestOptions(),
+				loggerFactory1));
 		await system1.CreateActorAsync(() => new KcpEchoActor(), "echo",
 			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
 
@@ -243,17 +249,104 @@ public sealed class KcpTransportTests
 				Version = MessageEnvelopeSerializer.WireVersion,
 				IsResponse = true
 			}), CancellationToken.None);
-		await Task.Delay(TimeSpan.FromSeconds(2));
+		// Positive proof the unknown-contract response was observed and rejected on node1 (and not
+		// silently lost, which would make the negative assertion below vacuous).
+		await loggerFactory1.WaitForLogAsync("payload contract id 555123457", TimeSpan.FromSeconds(10));
+
+		// The session survived both injections: a real call still roundtrips. This also gives any
+		// would-be looped fault (node1 answering the unreadable response) time to reach node2.
+		(await remote.CallAsync<string>(new KcpEchoRequest("again"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:again");
+
+		// Fault-loop guard: node1 must not have answered the unknown-contract *response* with a
+		// fault — node2 would log such a looped fault as another stale response for message 888.
 		lock (loggerFactory2.LockObject)
 		{
 			loggerFactory2.Messages.Should().NotContain(
-				message => message.Contains("888", StringComparison.Ordinal),
+				message => message.Contains("Dropped a stale response for message 888", StringComparison.Ordinal),
 				"an unresolvable fault response must be dropped instead of triggering another fault");
 		}
+	}
 
-		// The session survived both injections: a real call still roundtrips.
-		(await remote.CallAsync<string>(new KcpEchoRequest("again"), TimeSpan.FromSeconds(10)))
-			.Should().Be("echo:again");
+	[Fact]
+	public async Task CallAsync_ShouldFailFastWhenKcpResponseContractIdUnknown()
+	{
+		// Node1 calls node2's slow actor (no response will ever arrive), then node2 injects a
+		// response frame whose payload contract id node1 does not know. Node1 holds the pending
+		// call's message id, so it must fail the pending call locally (RpcDispatchException)
+		// instead of dropping the frame and leaving the caller to the call timeout.
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				new StaticClusterNodeConfiguration
+				{
+					NodeId = "node1",
+					Host = "127.0.0.1",
+					Port = port1,
+					HandleOffset = 1000,
+					Services = new Dictionary<string, long>(StringComparer.Ordinal)
+				},
+				new StaticClusterNodeConfiguration
+				{
+					NodeId = "node2",
+					Host = "127.0.0.1",
+					Port = port2,
+					HandleOffset = 2000,
+					Services = new Dictionary<string, long>(StringComparer.Ordinal)
+					{
+						["slow"] = 2001
+					}
+				}
+			}
+		};
+
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		KcpTransport? transport1 = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport1 = new KcpTransport(sys, registry1, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, CreateTestOptions(),
+				NullLoggerFactory.Instance));
+		await system2.CreateActorAsync(() => new KcpSlowActor(), "slow",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
+
+		var callTask = system1.CallAsync<string>(new ActorHandle(2001), new KcpEchoRequest("ping"),
+			TimeSpan.FromSeconds(30));
+		await WaitForConditionAsync(
+			() => transport1!._pendingCalls.Count == 1 && transport2!._connections.ContainsKey("node1"),
+			TimeSpan.FromSeconds(5), "the pending call and the session must be established");
+
+		// node2 injects the unreadable response over the live session, mirroring the message id of
+		// node1's pending call.
+		var pendingMessageId = transport1!._pendingCalls.Keys.Single();
+		var connection2 = transport2!._connections["node1"];
+		await connection2.SendFrameAsync(KcpFrameType.Envelope, MessagePackSerializer.Serialize(
+			new SerializedMessageEnvelope
+			{
+				MessageId = pendingMessageId,
+				From = 2001,
+				To = 1001,
+				CallType = CallType.Call,
+				PayloadContractId = 555123459,
+				Payload = new byte[] { 1 },
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			}), CancellationToken.None);
+
+		Func<Task> act = async () => await callTask.WaitAsync(TimeSpan.FromSeconds(10));
+		(await act.Should().ThrowAsync<RpcDispatchException>())
+			.Which.Message.Should().Contain("555123459",
+				"the local fast-fail must name the unresolvable contract id");
+		transport1._pendingCalls.Should().BeEmpty("the local fast-fail must drain the pending call");
 	}
 
 	[Fact]
@@ -349,7 +442,7 @@ public sealed class KcpTransportTests
 		// A late datagram for the retired conversation (in the real world: the peer's handshake
 		// reply that outlived the outbound handshake timeout) must not recreate the session.
 		using var source = new UdpClient();
-		var retiredConversationId = GetConversationId(connection);
+		var retiredConversationId = connection.ConversationId;
 		await SendJunkDatagramAsync(source, port2, retiredConversationId);
 		await Task.Delay(TimeSpan.FromSeconds(1));
 		transport2._sessionsByConv.ContainsKey(retiredConversationId).Should().BeFalse(
@@ -389,6 +482,40 @@ public sealed class KcpTransportTests
 		}
 	}
 
+	[Fact]
+	public void Constructor_ShouldRejectNonPositiveMaxMessageBytes()
+	{
+		// MaxMessageBytes = 0 used to silently disable the message size guard; "no limit" must be
+		// an explicit int.MaxValue so the guard can never be lost to an accidental default value.
+		var configuration = CreateConfiguration(GetFreeUdpPort(), GetFreeUdpPort());
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		Action act = () => _ = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new KcpTransport(sys, registry, new KcpTransportOptions
+			{
+				MaxMessageBytes = 0
+			}, NullLoggerFactory.Instance));
+		act.Should().Throw<ArgumentOutOfRangeException>()
+			.And.ActualValue.Should().Be(0);
+	}
+
+	[Fact]
+	public async Task Constructor_ShouldAcceptExplicitIntMaxValueMessageSize()
+	{
+		// Disabling the message size guard is a deliberate opt-in: int.MaxValue must be accepted.
+		var configuration = CreateConfiguration(GetFreeUdpPort(), GetFreeUdpPort());
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		KcpTransport? transport = null;
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => transport = new KcpTransport(sys, registry, new KcpTransportOptions
+			{
+				MaxMessageBytes = int.MaxValue,
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		transport!.LocalNodeId.Should().Be("node1");
+	}
+
 	private static void ForceKcpDeadLink(KcpConnection connection)
 	{
 		var pump = (KcpConnectionPump)typeof(KcpConnection)
@@ -398,11 +525,6 @@ public sealed class KcpTransportTests
 		var kcp = (global::kcp2k.Kcp)typeof(KcpSession)
 			.GetField("_kcp", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
 		kcp.state = -1;
-	}
-
-	private static uint GetConversationId(KcpConnection connection)
-	{
-		return connection.ConversationId;
 	}
 
 	/// <summary>

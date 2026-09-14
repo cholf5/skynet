@@ -89,10 +89,11 @@ public sealed class SkynetActorGeneratorTests
 			generatedSource.Should().NotContain("GetAwaiter().GetResult()");
 		}
 
-		// void 方法：fire-and-forget（入队即返回），并以 OnlyOnFaulted 观察入队异常；
-		// XML 注释说明 send 语义。
+		// void 方法：fire-and-forget（入队即返回），入队异常经 ReportSendEnqueueFaulted 观测
+		// （计数 + ActorSystem.SendEnqueueFailed 回调）而非静默吞掉；XML 注释说明 send 语义。
 		var proxySource = generatedSources.Should().Contain(s => s.Contains("IMixedActorProxy")).Subject;
 		proxySource.Should().Contain("TaskContinuationOptions.OnlyOnFaulted");
+		proxySource.Should().Contain("ReportSendEnqueueFaulted");
 		proxySource.Should().Contain("send 语义：入队即返回，不等待 actor 处理完成");
 		proxySource.Should().Contain("call 语义：等待 actor 处理完成并返回结果（请使用 await 调用）");
 	}

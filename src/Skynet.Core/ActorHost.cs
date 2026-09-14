@@ -82,6 +82,32 @@ internal sealed class ActorHost : IAsyncDisposable
 		catch (Exception ex)
 		{
 			_startup.TrySetException(ex);
+			// Since DeliverLocalAsync no longer awaits Startup (self-sends from the start hook must
+			// not deadlock), messages can already be queued in the mailbox when the start hook
+			// fails. Fail-fast every queued message with the original startup exception instead of
+			// leaving the caller's completion dangling forever: completing the writer first makes
+			// subsequent enqueues fail immediately (ChannelClosedException), and the unbounded
+			// mailbox completes writes synchronously, so every message either is already queued
+			// (drained below) or its enqueue threw.
+			_mailbox.Writer.TryComplete();
+			while (_mailbox.Reader.TryRead(out var pending))
+			{
+				_metrics.OnMessageDequeued(Handle);
+				// Mirror the regular processing path semantics: cancellation completes canceled,
+				// everything else faults — and both are counted like processed messages so the
+				// error metric does not miss the drained ones.
+				if (ex is OperationCanceledException)
+				{
+					pending.Completion?.TrySetCanceled(_cts.Token);
+					_metrics.OnMessageProcessed(Handle, TimeSpan.Zero, true);
+				}
+				else
+				{
+					pending.Completion?.TrySetException(ex);
+					_metrics.OnMessageProcessed(Handle, TimeSpan.Zero, false);
+				}
+			}
+
 			_stopped.TrySetResult(true);
 			return;
 		}

@@ -176,6 +176,73 @@ public sealed class RpcSourceGeneratorTests
 		completed.Should().Be(slowActor.Completed);
 	}
 
+	[Fact]
+	public async Task VoidProxy_ShouldRaiseHookAndCounterWhenEnqueueFaults()
+	{
+		// Fire-and-forget send 永不向调用方抛出入队异常：transport 在 system 之下被释放后，
+		// 入队以异步失败任务收场，必须经由 SendEnqueueFailed 钩子 + 指标计数暴露，
+		// 而不是被生成代码静默吞掉（此前为 `_ = faulted.Exception`）。
+		InProcTransport? transport = null;
+		await using var system = new ActorSystem(
+			transportFactory: sys => transport = new InProcTransport(sys,
+				new InProcTransportOptions { ShortCircuitLocalDelivery = false }));
+		var slowActor = new SlowActor();
+		var actor = await system.CreateActorAsync(() => slowActor, "slow");
+
+		var hooked = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+		ActorRef? hookedActor = null;
+		system.SendEnqueueFailed += (actorRef, exception) =>
+		{
+			hookedActor = actorRef;
+			hooked.TrySetResult(exception);
+		};
+
+		var proxy = actor.CreateProxy<ISlowActor>();
+		proxy.Fire("before");
+
+		// 释放 transport（system 仍在运行）：下一次 send 的入队任务将异步失败。
+		await transport!.DisposeAsync();
+		proxy.Fire("after");
+
+		var observed = await hooked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+		observed.Should().BeOfType<ObjectDisposedException>();
+		hookedActor.Should().NotBeNull();
+		hookedActor!.Handle.Value.Should().Be(actor.Handle.Value);
+		system.Metrics.SendEnqueueFailureCount.Should().Be(1);
+	}
+
+	[Fact]
+	public async Task VoidProxy_ThrowingSendEnqueueFailedHandlerMustNotEscape()
+	{
+		// 回归防护：OnSendEnqueueFailed 运行在生成代理丢弃的 OnlyOnFaulted 续接里，
+		// handler 抛出的异常若逃逸会重新变成未观察任务异常（本钩子要消除的问题），
+		// 并且会跳过同一事件的后续 handler。抛异常的 handler 必须被吞掉（仅 Debug 日志），
+		// 后续 handler 与指标计数不受影响。
+		InProcTransport? transport = null;
+		await using var system = new ActorSystem(
+			transportFactory: sys => transport = new InProcTransport(sys,
+				new InProcTransportOptions { ShortCircuitLocalDelivery = false }));
+		var actor = await system.CreateActorAsync(() => new SlowActor(), "throwing-hook-target");
+
+		var throwingHandlerRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		system.SendEnqueueFailed += (_, _) =>
+		{
+			throwingHandlerRan.TrySetResult();
+			throw new InvalidOperationException("handler boom");
+		};
+
+		var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+		system.SendEnqueueFailed += (_, exception) => observed.TrySetResult(exception);
+
+		var proxy = actor.CreateProxy<ISlowActor>();
+		await transport!.DisposeAsync();
+		proxy.Fire("after");
+
+		await throwingHandlerRan.Task.WaitAsync(TimeSpan.FromSeconds(5));
+		(await observed.Task.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeOfType<ObjectDisposedException>();
+		system.Metrics.SendEnqueueFailureCount.Should().Be(1);
+	}
+
 	[SkynetActor("slow", Unique = true)]
 	public interface ISlowActor
 	{

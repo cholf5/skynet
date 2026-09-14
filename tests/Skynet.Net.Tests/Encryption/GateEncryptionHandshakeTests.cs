@@ -54,6 +54,22 @@ public sealed class GateEncryptionHandshakeTests
 	}
 
 	[Fact]
+	public void ProcessResponseToken_ShouldExposeTokenExpireUnixMs()
+	{
+		// The decoded expiry is exposed informationally (the client clock is not authoritative);
+		// this locks the behavior that the expiry carried in the response frame is surfaced as-is.
+		using var keyProvider = InMemoryGateRsaKeyProvider.Generate();
+		var clientSession = new GateEncryptionClientSession(keyProvider);
+
+		const long expireUnixMs = 4102444800000; // arbitrary fixed value (2100-01-01 UTC)
+		clientSession.TokenExpireUnixMs.Should().BeNull();
+		_ = clientSession.ProcessResponseToken(GateFrameCodec.EncodeResponseToken(
+			GateEncryptionTestHelpers.RandomBytes(GateHandshakeCodec.TokenByteLength), expireUnixMs));
+
+		clientSession.TokenExpireUnixMs.Should().Be(expireUnixMs);
+	}
+
+	[Fact]
 	public void GateRejectsReplayWithMismatchedToken()
 	{
 		using var keyProvider = InMemoryGateRsaKeyProvider.Generate();

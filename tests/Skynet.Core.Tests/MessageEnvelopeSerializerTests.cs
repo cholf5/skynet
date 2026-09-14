@@ -89,7 +89,8 @@ public sealed class MessageEnvelopeSerializerTests
 		act.Should().Throw<NotSupportedException>();
 	}
 
-	private static SerializedMessageEnvelope CreateDto(int contractId, byte[]? payload = null, int version = 3)
+	private static SerializedMessageEnvelope CreateDto(int contractId, byte[]? payload = null,
+		int version = MessageEnvelopeSerializer.WireVersion)
 	{
 		return new SerializedMessageEnvelope
 		{

@@ -16,6 +16,7 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly ConcurrentDictionary<long, string> _handleToName = new();
 	private readonly Lock _registryLock = new();
 	private readonly ILoggerFactory _loggerFactory;
+	private readonly ILogger _logger;
 	private readonly ITransport _transport;
 	private readonly bool _ownsTransport;
 	private readonly long _handleOffset;
@@ -44,6 +45,7 @@ public sealed class ActorSystem : IAsyncDisposable
 		Func<ActorSystem, ITransport>? transportFactory = null)
 	{
 		_loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+		_logger = _loggerFactory.CreateLogger<ActorSystem>();
 		_handleOffset = options?.HandleOffset ?? 0;
 		_clusterRegistry = options?.ClusterRegistry;
 		Metrics = options?.MetricsCollector ?? new ActorMetricsCollector();
@@ -66,6 +68,43 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// Gets the metrics collector used by the actor system.
 	/// </summary>
 	public ActorMetricsCollector Metrics { get; }
+
+	/// <summary>
+	/// Raised when a generated void (send) proxy observes that a fire-and-forget enqueue failed
+	/// (e.g. the transport was disposed or the enqueue was canceled). The send path never throws
+	/// to its caller, so this hook — together with the <see cref="ActorMetricsCollector"/> send
+	/// failure counter — is the only way to observe such failures. Handlers may fire concurrently
+	/// on the thread pool (each faulted enqueue runs its own OnlyOnFaulted continuation), so
+	/// handler implementations must be thread-safe.
+	/// </summary>
+	public event Action<ActorRef, Exception>? SendEnqueueFailed;
+
+	internal void OnSendEnqueueFailed(ActorRef actor, Exception exception)
+	{
+		Metrics.OnSendEnqueueFailed();
+		// A throwing handler must never escape — this method runs inside the generated proxy's
+		// OnlyOnFaulted continuation (a deliberately discarded task), so an escape would resurface
+		// as an unobserved task exception, the exact problem this hook exists to eliminate.
+		// Handlers are invoked individually so one throwing handler can neither escape nor skip
+		// the remaining handlers of the same event.
+		if (SendEnqueueFailed is not Action<ActorRef, Exception> handlers)
+		{
+			return;
+		}
+
+		foreach (var handler in handlers.GetInvocationList())
+		{
+			try
+			{
+				((Action<ActorRef, Exception>)handler)(actor, exception);
+			}
+			catch (Exception handlerEx)
+			{
+				_logger.LogDebug(handlerEx, "A SendEnqueueFailed handler threw while reporting a failed send of type {ExceptionType}.",
+					exception.GetType().Name);
+			}
+		}
+	}
 
 	/// <summary>
 	/// Gets the timer scheduler that delivers due timer callbacks to actor mailboxes.

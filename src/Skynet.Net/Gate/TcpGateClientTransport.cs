@@ -13,19 +13,14 @@ namespace Skynet.Net;
 /// </summary>
 public sealed class TcpGateClientTransport : IGateClientTransport
 {
-	private readonly int _maxFrameBytes;
+	private readonly TcpGateClientTransportOptions _options;
 	private readonly ILogger _logger;
 
 	public TcpGateClientTransport(TcpGateClientTransportOptions? options = null, ILogger? logger = null)
 	{
-		options ??= new TcpGateClientTransportOptions();
-		if (options.MaxFrameBytes <= 0)
-		{
-			throw new ArgumentOutOfRangeException(nameof(options), options.MaxFrameBytes,
-				"MaxFrameBytes must be positive.");
-		}
+		_options = options ?? new TcpGateClientTransportOptions();
+		_options.Validate();
 
-		_maxFrameBytes = options.MaxFrameBytes;
 		_logger = logger ?? NullLogger.Instance;
 	}
 
@@ -46,7 +41,7 @@ public sealed class TcpGateClientTransport : IGateClientTransport
 			throw;
 		}
 
-		return new TcpGateProxyConnection(endpoint, client, startReceiveLoop: true, _maxFrameBytes, _logger);
+		return new TcpGateProxyConnection(endpoint, client, _options, _logger);
 	}
 
 	private static (string Host, int Port) ParseEndpoint(string endpoint)
@@ -81,13 +76,16 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 	private bool _closeRaised;
 	private bool _disposed;
 
-	internal TcpGateProxyConnection(GateEndpoint endpoint, TcpClient client, bool startReceiveLoop,
-		int maxFrameBytes, ILogger? logger)
+	internal TcpGateProxyConnection(GateEndpoint endpoint, TcpClient client,
+		TcpGateClientTransportOptions options, ILogger? logger, bool startReceiveLoop = true)
 	{
 		ArgumentNullException.ThrowIfNull(endpoint);
+		ArgumentNullException.ThrowIfNull(options);
 		_client = client ?? throw new ArgumentNullException(nameof(client));
 		ConnectionId = $"{endpoint.Name}:{Guid.NewGuid():N}";
-		_maxFrameBytes = maxFrameBytes;
+		// Copy the settings out up front: the options object is mutable and shared, and the
+		// connection must be immune to later configuration changes.
+		_maxFrameBytes = options.MaxFrameBytes;
 		_logger = logger ?? NullLogger.Instance;
 		if (startReceiveLoop)
 		{
@@ -149,7 +147,7 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 		}
 	}
 
-	public async ValueTask DisposeAsync()
+	public ValueTask DisposeAsync()
 	{
 		bool alreadyDisposed;
 		lock (_sync)
@@ -160,7 +158,7 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 
 		if (alreadyDisposed)
 		{
-			return;
+			return ValueTask.CompletedTask;
 		}
 
 		// Disposing the socket aborts in-flight writes with IOException so lock holders exit
@@ -168,7 +166,7 @@ public sealed class TcpGateProxyConnection : IGateProxyConnection
 		// itself is never disposed: it holds no unmanaged resources (AvailableWaitHandle is
 		// never touched) and disposing it would strand senders queued on WaitAsync forever.
 		((IDisposable)_client).Dispose();
-		await Task.CompletedTask.ConfigureAwait(false);
+		return ValueTask.CompletedTask;
 	}
 
 	private async Task RunReceiveLoopAsync()

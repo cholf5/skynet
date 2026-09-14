@@ -41,6 +41,14 @@ public sealed class GateEncryptionClientSession
 	/// <summary>Gets the session key derived from the seed; null until <see cref="ProcessResponseToken"/> ran.</summary>
 	public byte[]? SessionKey => _sessionKey;
 
+	/// <summary>
+	/// Gets the token expiry (unix milliseconds, as announced by the gate) decoded from the
+	/// ResponseEncryptToken frame; null before that frame arrived. Informational only: the client
+	/// clock is not authoritative, so expiry is enforced by the gate — never reject the handshake
+	/// based on this value.
+	/// </summary>
+	public long? TokenExpireUnixMs { get; private set; }
+
 	/// <summary>Gets the frame cipher for business frames; null until the handshake completed.</summary>
 	public ISessionFrameCipher? FrameCipher => _frameCipher;
 
@@ -69,6 +77,7 @@ public sealed class GateEncryptionClientSession
 		}
 
 		var token = GateFrameCodec.DecodeResponseToken(frame);
+		TokenExpireUnixMs = token.ExpireUnixMs;
 		var seed = _randomSource.GetSeedBytes(GateHandshakeCodec.SeedByteLength);
 		_sessionKey = GateHandshakeCodec.DeriveSessionKey(seed, _cipherId, _hkdfSalt);
 

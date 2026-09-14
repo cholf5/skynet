@@ -8,6 +8,7 @@ namespace Skynet.Core;
 public sealed class ActorMetricsCollector
 {
 	private readonly ConcurrentDictionary<long, ActorMetricsEntry> _entries = new();
+	private long _sendEnqueueFailureCount;
 
 	/// <summary>
 	/// Registers a new actor with the metrics collector.
@@ -59,6 +60,19 @@ public sealed class ActorMetricsCollector
 			entry.OnMessageProcessed(duration, success);
 		}
 	}
+
+	/// <summary>
+	/// Records a fire-and-forget (send) enqueue failure observed by a generated void proxy. The
+	/// send path never throws to its caller, so this counter is the only system-wide trace of
+	/// such failures.
+	/// </summary>
+	public void OnSendEnqueueFailed()
+	{
+		Interlocked.Increment(ref _sendEnqueueFailureCount);
+	}
+
+	/// <summary>Gets the total number of fire-and-forget (send) enqueues that failed system-wide.</summary>
+	public long SendEnqueueFailureCount => Interlocked.Read(ref _sendEnqueueFailureCount);
 
 	/// <summary>
 	/// Enables tracing for the specified actor.

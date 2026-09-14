@@ -476,11 +476,12 @@ public sealed class SkynetActorGenerator : IIncrementalGenerator
 		{
 			case ActorReturnKind.Void:
 				// send 语义：入队即返回，不等待 actor 处理完成。以 OnlyOnFaulted 续接观察入队
-				// 失败异常（如 actor 系统已释放或入队被取消），避免产生未观察的 Task 异常。
+				// 失败异常（如 transport 已释放或入队被取消）：递增系统级失败计数并触发
+				// ActorSystem.SendEnqueueFailed 回调，而不是静默吞掉异常。
 				writer.AppendLine(
 					$"var enqueueTask = _actor.SendAsync(payload, {cancellationName}).AsTask();");
 				writer.AppendLine(
-					"_ = enqueueTask.ContinueWith(static faulted => _ = faulted.Exception, global::System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);");
+					"_ = enqueueTask.ContinueWith(static (faulted, actor) => ((global::Skynet.Core.ActorRef)actor!).ReportSendEnqueueFaulted(faulted.Exception!), _actor, global::System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);");
 				break;
 			case ActorReturnKind.Task:
 				writer.AppendLine($"return _actor.CallAsync<object?>(payload, cancellationToken: {cancellationName});");
