@@ -1,0 +1,14 @@
+{
+  "Scenario": "local-call",
+  "DurationSeconds": 5.001,
+  "Concurrency": 1,
+  "TotalOps": 2594987,
+  "OpsPerSecond": 518868.06694563315,
+  "Latency": {
+    "MinMs": 0.067,
+    "P50Ms": 0.158,
+    "P90Ms": 0.246,
+    "P99Ms": 0.625,
+    "MaxMs": 1749.879
+  }
+}

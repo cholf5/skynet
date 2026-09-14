@@ -1,0 +1,14 @@
+{
+  "Scenario": "remote-call",
+  "DurationSeconds": 5.001,
+  "Concurrency": 1,
+  "TotalOps": 109579,
+  "OpsPerSecond": 21910.080154474872,
+  "Latency": {
+    "MinMs": 1.821,
+    "P50Ms": 4.279,
+    "P90Ms": 6.442,
+    "P99Ms": 10.188,
+    "MaxMs": 126.2
+  }
+}

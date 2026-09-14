@@ -1,0 +1,12 @@
+scenario:     remote-call
+duration:     5.001s
+concurrency:  1
+total ops:    109579
+ops/sec:      21,910
+latency min:  1.821 ms
+latency p50:  4.279 ms
+latency p90:  6.442 ms
+latency p99:  10.188 ms
+latency max:  126.2 ms
+
+JSON results written to benchmarks/results/20260915-075411-remote-call.json
