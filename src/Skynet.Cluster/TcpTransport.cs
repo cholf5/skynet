@@ -62,7 +62,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		_logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<TcpTransport>();
 		_serializerOptions = _options.SerializerOptions ?? MessagePackSerializerOptions.Standard;
-		_deadNodeGracePeriod = ResolveDeadNodeGracePeriod(_options);
+		_deadNodeGracePeriod = DeadNodeGracePeriod.Resolve(_options.DeadNodeGracePeriod, _options.HeartbeatInterval);
 		var localNodeId = registry.LocalNodeId ??
 		                  throw new InvalidOperationException("The registry does not expose a local node identifier.");
 		if (!_registry.TryGetNode(localNodeId, out var descriptor))
@@ -215,18 +215,6 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		{
 			gate.Release();
 		}
-	}
-
-	private static TimeSpan ResolveDeadNodeGracePeriod(TcpTransportOptions options)
-	{
-		if (options.DeadNodeGracePeriod > TimeSpan.Zero)
-		{
-			return options.DeadNodeGracePeriod;
-		}
-
-		return options.HeartbeatInterval > TimeSpan.Zero
-			? TimeSpan.FromTicks(3 * options.HeartbeatInterval.Ticks)
-			: TimeSpan.Zero;
 	}
 
 	/// <summary>

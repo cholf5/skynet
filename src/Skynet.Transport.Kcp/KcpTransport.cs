@@ -7,9 +7,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Core;
 using Skynet.Core.Serialization;
-using Skynet.Cluster.Transport.Kcp;
 
-namespace Skynet.Cluster;
+namespace Skynet.Transport.Kcp;
 
 /// <summary>
 /// Provides a UDP-based transport built on the KCP protocol (vendored managed implementation) for
@@ -21,14 +20,14 @@ namespace Skynet.Cluster;
 /// <para>
 /// Every remote node is one KCP session identified by a 32-bit conversation id carried at the head
 /// of each datagram. Frames ride the reliable KCP stream in stream order: a handshake exchange
-/// (node id swap) precedes any envelope traffic. Framing mirrors <see cref="TcpTransport"/>
-/// (handshake/envelope/heartbeat frame types, the same envelope serialization, pending-call
-/// tracking, and heartbeat-based dead-peer detection) so the two transports are semantically
-/// interchangeable from an <see cref="ActorSystem"/> perspective.
+/// (node id swap) precedes any envelope traffic. Framing mirrors the TCP transport
+/// (<c>TcpTransport</c> in Skynet.Cluster; handshake/envelope/heartbeat frame types, the same
+/// envelope serialization, pending-call tracking, and heartbeat-based dead-peer detection) so the
+/// two transports are semantically interchangeable from an <see cref="ActorSystem"/> perspective.
 /// </para>
 /// <para>
-/// Unlike <see cref="TcpTransport"/>, this transport does not stack the protocol-independent
-/// <see cref="Transport.Reliable.ReliableQueue"/> on top of KCP: KCP already provides reliability
+/// Unlike the TCP transport, this transport does not stack the protocol-independent
+/// <see cref="Reliable.ReliableQueue"/> on top of KCP: KCP already provides reliability
 /// and retransmission, so an additional layer would be pure overhead. ReliableQueue exists for
 /// transports that receive no reliability from their underlying channel.
 /// </para>
@@ -43,15 +42,6 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	}
 
 	private const int ConversationHeaderLength = KcpWire.ConversationHeaderLength;
-
-	/// <summary>
-	/// How long the conversation id of a closed session is remembered as retired. Late datagrams
-	/// for a retired conversation are dropped instead of creating a new inbound session, so a peer
-	/// reply that arrives after the local session already died (e.g. a handshake response that
-	/// outlived the outbound <see cref="KcpTransportOptions.ConnectTimeout"/>) cannot resurrect the
-	/// dead session under an attacker-controlled source endpoint.
-	/// </summary>
-	private static readonly TimeSpan RetiredConversationRetention = TimeSpan.FromMinutes(5);
 
 	private readonly ActorSystem _system;
 	private readonly IClusterRegistry _registry;
@@ -526,7 +516,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		// Retire the conversation id so late datagrams for this dead session cannot resurrect it
 		// as a fresh inbound session (the session-resurrection hole).
 		_retiredConversations[connection.ConversationId] =
-			Environment.TickCount64 + RetiredConversationRetention.Ticks;
+			Environment.TickCount64 + _options.RetiredConversationRetention.Ticks;
 
 		if (_disposed != 0 || !connection.TryGetRemoteNodeId(out var nodeId))
 		{
@@ -626,8 +616,8 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	/// hanging until the session dies. Response frames carry this node's own message id, so the
 	/// matching pending call is failed locally — no reply is ever sent for an unreadable frame: a
 	/// fault we cannot read must not trigger another fault, or two peers with mismatched contract
-	/// sets would loop forever on each other's fault responses. Mirrors
-	/// <see cref="TcpTransport.HandleUnknownPayloadContractAsync"/>.
+	/// sets would loop forever on each other's fault responses. Mirrors the equivalent handler of
+	/// the TCP transport (<c>TcpTransport.HandleUnknownPayloadContractAsync</c>).
 	/// </summary>
 	internal async Task HandleUnknownPayloadContractAsync(KcpConnection connection, MessageEnvelope request,
 		int contractId)
@@ -832,6 +822,17 @@ public sealed class KcpTransportOptions
 	/// is greater than zero.
 	/// </summary>
 	public TimeSpan DeadNodeGracePeriod { get; init; } = TimeSpan.Zero;
+
+	/// <summary>
+	/// Gets or sets how long the conversation id of a closed session is remembered as retired. Late
+	/// datagrams for a retired conversation are dropped instead of creating a new inbound session,
+	/// so a peer reply that arrives after the local session already died (e.g. a handshake response
+	/// that outlived the outbound <see cref="ConnectTimeout"/>) cannot resurrect the dead session
+	/// under an attacker-controlled source endpoint. Defaults to 5 minutes. Set to
+	/// <see cref="TimeSpan.Zero"/> to disable conversation retirement (late datagrams may then
+	/// resurrect closed sessions).
+	/// </summary>
+	public TimeSpan RetiredConversationRetention { get; init; } = TimeSpan.FromMinutes(5);
 
 	/// <summary>
 	/// Gets or sets the maximum allowed frame payload size in bytes. KCP fragments large messages

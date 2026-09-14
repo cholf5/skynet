@@ -1,8 +1,8 @@
-// Keep in sync with the copy at tests/Skynet.Transport.Kcp.Tests/TestLogging.cs.
+// Copied from tests/Skynet.Core.Tests/TestLogging.cs — keep in sync.
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 
-namespace Skynet.Core.Tests;
+namespace Skynet.Transport.Kcp.Tests;
 
 /// <summary>
 /// Minimal in-memory <see cref="ILoggerFactory"/> shared by transport tests to assert that specific

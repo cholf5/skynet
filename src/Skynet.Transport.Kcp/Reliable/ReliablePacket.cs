@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
 
-namespace Skynet.Cluster.Transport.Reliable;
+namespace Skynet.Transport.Kcp.Reliable;
 
 /// <summary>
 /// Represents a packet exchanged between two <see cref="ReliableQueue"/> peers.

@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 using Skynet.Core;
 using Skynet.Core.Serialization;
 
-namespace Skynet.Cluster.Transport.Kcp;
+namespace Skynet.Transport.Kcp;
 
 /// <summary>
 /// Identifies the frame types carried as application messages inside the reliable KCP stream.
@@ -56,7 +56,7 @@ internal sealed class KcpConnection : IAsyncDisposable
 		RemoteEndPoint = remoteEndPoint;
 		Outbound = outbound;
 		Options = options;
-		_deadNodeGracePeriod = ResolveDeadNodeGracePeriod(options);
+		_deadNodeGracePeriod = DeadNodeGracePeriod.Resolve(options.DeadNodeGracePeriod, options.HeartbeatInterval);
 		var interval = TimeSpan.FromMilliseconds(Math.Max(1, options.IntervalMilliseconds));
 		_pump = new KcpConnectionPump(
 			new KcpSession(
@@ -90,23 +90,6 @@ internal sealed class KcpConnection : IAsyncDisposable
 	internal bool Outbound { get; }
 
 	private KcpTransportOptions Options { get; }
-
-	/// <summary>
-	/// Mirrors <see cref="TcpTransport.ResolveDeadNodeGracePeriod"/>: an explicitly configured
-	/// grace period wins; otherwise it defaults to three times the heartbeat interval so dead-peer
-	/// detection is active by default instead of requiring explicit configuration.
-	/// </summary>
-	private static TimeSpan ResolveDeadNodeGracePeriod(KcpTransportOptions options)
-	{
-		if (options.DeadNodeGracePeriod > TimeSpan.Zero)
-		{
-			return options.DeadNodeGracePeriod;
-		}
-
-		return options.HeartbeatInterval > TimeSpan.Zero
-			? TimeSpan.FromTicks(3 * options.HeartbeatInterval.Ticks)
-			: TimeSpan.Zero;
-	}
 
 	internal string RemoteNodeId =>
 		_remoteNodeId ?? throw new InvalidOperationException("Handshake not completed.");

@@ -10,13 +10,15 @@ Skynet 是一个面向游戏后端的 Actor 框架，目标是在 .NET 生态中
 Skynet.sln
 ├── src/
 │   ├── Skynet.Core/         # 核心 Actor 运行时（ActorSystem、Registry 等）
-│   ├── Skynet.Cluster/      # 跨节点通信与注册表实现
+│   ├── Skynet.Cluster/      # 跨节点注册表与 TCP 传输
+│   ├── Skynet.Transport.Kcp/ # KCP/UDP 传输插件（含 vendored kcp2k 与 ReliableQueue）
 │   ├── Skynet.Net/          # 传输层、TCP/WebSocket 接入
 │   ├── Skynet.Extras/       # DataCenter、Multicast、DebugConsole 等扩展
 │   └── Skynet.Examples/     # 示例程序与入门指南
 └── tests/
     ├── Skynet.Core.Tests/
     ├── Skynet.Cluster.Tests/
+    ├── Skynet.Transport.Kcp.Tests/
     ├── Skynet.Net.Tests/
     └── Skynet.Extras.Tests/
 ```
