@@ -449,8 +449,6 @@ public sealed class GateServer : IAsyncDisposable
 					break;
 				}
 
-				connection.MarkActivity();
-
 				if (rateLimiter is not null)
 				{
 					var decision = rateLimiter.EvaluateInboundFrame(metadata, frame.Payload.Length);
@@ -469,6 +467,10 @@ public sealed class GateServer : IAsyncDisposable
 						continue;
 					}
 				}
+
+				// Only frames accepted by the rate limiter count as activity, otherwise dropped
+				// junk traffic would keep a session alive past the idle timeout.
+				connection.MarkActivity();
 
 				if (!pipeline.IsReadyForBusiness)
 				{
