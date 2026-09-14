@@ -11,4 +11,17 @@ public sealed class TcpGateClientTransportOptions
 	/// to 1 MB, mirroring <see cref="GateServerOptions.MaxMessageBytes"/>.
 	/// </summary>
 	public int MaxFrameBytes { get; set; } = 1024 * 1024;
+
+	/// <summary>
+	/// Validates the configuration and throws if invalid (same options-Validate style as
+	/// <see cref="GateServerOptions.Validate"/>).
+	/// </summary>
+	public void Validate()
+	{
+		if (MaxFrameBytes <= 0)
+		{
+			throw new ArgumentOutOfRangeException(nameof(MaxFrameBytes), MaxFrameBytes,
+				"MaxFrameBytes must be positive.");
+		}
+	}
 }
