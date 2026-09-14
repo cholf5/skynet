@@ -33,11 +33,11 @@ public sealed class GateServerEncryptionTests
 			var reply = await client.ReceiveBusinessAsync().ConfigureAwait(false);
 
 			reply.Should().Be("HELLO");
-				// The authentication callback captured the gate-side client → gate direction key; both
-				// endpoints derived the same directional keys from the seed delivered over RSA.
-				var serverKey = await fixture.SessionKeyTask.WaitAsync(WaitTimeout).ConfigureAwait(false);
-				serverKey.Should().NotBeNull();
-				serverKey.Should().Equal(client.Session.ClientToGateKey);
+			// The authentication callback captured the gate-side client → gate direction key; both
+			// endpoints derived the same directional keys from the seed delivered over RSA.
+			var serverKey = await fixture.SessionKeyTask.WaitAsync(WaitTimeout).ConfigureAwait(false);
+			serverKey.Should().NotBeNull();
+			serverKey.Should().Equal(client.Session.ClientToGateKey);
 		}
 		finally
 		{

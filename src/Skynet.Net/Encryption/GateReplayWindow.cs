@@ -64,7 +64,12 @@ public sealed class GateReplayWindow
 		return !IsMarked(distance);
 	}
 
-	/// <summary>Marks <paramref name="sequence"/> as seen, advancing the high-water mark when needed. Call only after successful authentication.</summary>
+	/// <summary>
+	/// Marks <paramref name="sequence"/> as seen, advancing the high-water mark when needed. Precondition:
+	/// <see cref="IsAcceptable"/> must have returned true for <paramref name="sequence"/> first (the frame
+	/// codec only calls this after successful AEAD authentication); calling it for a rejected sequence
+	/// corrupts the window state.
+	/// </summary>
 	public void MarkSeen(ulong sequence)
 	{
 		if (!_initialized)
@@ -105,7 +110,10 @@ public sealed class GateReplayWindow
 
 	private void ShiftBitmap(ulong shift)
 	{
-		if (shift >= (ulong)_bitmap.Length * 64)
+		// Callers keep shift <= WindowSize (IsAcceptable bounds forward jumps), but treat anything at or
+		// beyond the window width as a full clear: every existing slot would land outside the window, and
+		// a blanket clear also avoids leaving stale marks when WindowSize is not a multiple of 64.
+		if (shift >= (ulong)WindowSize)
 		{
 			Array.Clear(_bitmap);
 			return;
