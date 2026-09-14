@@ -29,10 +29,16 @@ public static class GateFrameType
 
 /// <summary>
 /// Encodes and decodes the gate handshake wire frames and the encrypted session frame layout.
-/// Encrypted frame layout: nonce (12 bytes) || ciphertext || tag (16 bytes), associated data none.
+/// Encrypted frame layout: sequence (8 bytes, big-endian) || nonce (12 bytes) || ciphertext || tag (16 bytes).
+/// The sequence number doubles as the AEAD associated data, so the tag covers it: any tampering with the
+/// sequence fails authentication, and the receiver-side sliding window (see <see cref="GateReplayWindow"/>)
+/// rejects replays.
 /// </summary>
 public static class GateFrameCodec
 {
+	/// <summary>Length of the per-frame sequence number that prefixes every encrypted frame (big-endian ulong).</summary>
+	public const int SequenceByteLength = 8;
+
 	/// <summary>Encodes an empty RequestEncryptToken frame.</summary>
 	public static byte[] EncodeRequestToken()
 	{
@@ -101,40 +107,56 @@ public static class GateFrameCodec
 		return Encoding.UTF8.GetString(frame[1..]);
 	}
 
-	/// <summary>Encrypts a plaintext into a session frame: nonce || ciphertext || tag.</summary>
-	public static byte[] EncryptFrame(ISessionFrameCipher cipher, ReadOnlySpan<byte> plaintext)
+	/// <summary>
+	/// Encrypts a plaintext into a session frame: sequence || nonce || ciphertext || tag. The sequence
+	/// doubles as the AEAD associated data; senders must use a monotonically increasing counter per
+	/// direction (the sequence space restarts at zero for every handshake).
+	/// </summary>
+	public static byte[] EncryptFrame(ISessionFrameCipher cipher, ReadOnlySpan<byte> plaintext, ulong sequence)
 	{
 		ArgumentNullException.ThrowIfNull(cipher);
 		var nonce = RandomNumberGenerator.GetBytes(cipher.NonceSizeBytes);
 		var ciphertext = new byte[plaintext.Length];
 		var tag = new byte[cipher.TagSizeBytes];
-		cipher.Encrypt(nonce, plaintext, ciphertext, tag);
+		Span<byte> sequenceBytes = stackalloc byte[SequenceByteLength];
+		BinaryPrimitives.WriteUInt64BigEndian(sequenceBytes, sequence);
+		cipher.Encrypt(nonce, plaintext, ciphertext, tag, sequenceBytes);
 
-		var frame = new byte[nonce.Length + ciphertext.Length + tag.Length];
-		nonce.CopyTo(frame, 0);
-		ciphertext.CopyTo(frame, nonce.Length);
-		tag.CopyTo(frame, nonce.Length + ciphertext.Length);
+		var frame = new byte[SequenceByteLength + nonce.Length + ciphertext.Length + tag.Length];
+		sequenceBytes.CopyTo(frame);
+		nonce.CopyTo(frame, SequenceByteLength);
+		ciphertext.CopyTo(frame, SequenceByteLength + nonce.Length);
+		tag.CopyTo(frame, SequenceByteLength + nonce.Length + ciphertext.Length);
 		return frame;
 	}
 
 	/// <summary>
-	/// Decrypts a session frame. Throws <see cref="CryptographicException"/> when the frame is malformed or
-	/// fails authentication.
+	/// Decrypts a session frame. When <paramref name="replayWindow"/> is provided, the frame sequence is
+	/// checked against the window first and marked as seen only after authentication succeeded, so failed
+	/// authentication never burns window slots. Throws <see cref="CryptographicException"/> when the frame
+	/// is malformed, a replay / outside the replay window, or fails authentication.
 	/// </summary>
-	public static byte[] DecryptFrame(ISessionFrameCipher cipher, ReadOnlySpan<byte> frame)
+	public static byte[] DecryptFrame(ISessionFrameCipher cipher, ReadOnlySpan<byte> frame, GateReplayWindow? replayWindow = null)
 	{
 		ArgumentNullException.ThrowIfNull(cipher);
-		var headerLength = cipher.NonceSizeBytes + cipher.TagSizeBytes;
+		var headerLength = SequenceByteLength + cipher.NonceSizeBytes + cipher.TagSizeBytes;
 		if (frame.Length < headerLength)
 		{
-			throw new CryptographicException("Session frame is shorter than nonce plus tag.");
+			throw new CryptographicException("Session frame is shorter than sequence plus nonce plus tag.");
 		}
 
-		var nonce = frame[..cipher.NonceSizeBytes];
+		var sequence = BinaryPrimitives.ReadUInt64BigEndian(frame[..SequenceByteLength]);
+		if (replayWindow is not null && !replayWindow.IsAcceptable(sequence))
+		{
+			throw new CryptographicException($"Session frame sequence {sequence} was replayed or is outside the replay window.");
+		}
+
+		var nonce = frame[SequenceByteLength..(SequenceByteLength + cipher.NonceSizeBytes)];
 		var tag = frame[^cipher.TagSizeBytes..];
-		var ciphertext = frame[cipher.NonceSizeBytes..^cipher.TagSizeBytes];
+		var ciphertext = frame[(SequenceByteLength + cipher.NonceSizeBytes)..^cipher.TagSizeBytes];
 		var plaintext = new byte[ciphertext.Length];
-		cipher.Decrypt(nonce, ciphertext, tag, plaintext);
+		cipher.Decrypt(nonce, ciphertext, tag, plaintext, frame[..SequenceByteLength]);
+		replayWindow?.MarkSeen(sequence);
 		return plaintext;
 	}
 }

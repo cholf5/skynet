@@ -13,7 +13,7 @@ namespace Skynet.Net.Tests.Encryption;
 public sealed class GateEncryptionHandshakeTests
 {
 	[Fact]
-	public void FullHandshakeDerivesMatchingSessionKeys()
+	public void FullHandshakeDerivesMatchingDirectionalKeys()
 	{
 		using var keyProvider = InMemoryGateRsaKeyProvider.Generate();
 		var serverSession = new GateEncryptionServerSession(keyProvider);
@@ -21,13 +21,18 @@ public sealed class GateEncryptionHandshakeTests
 
 		var token = serverSession.IssueToken();
 		var confirm = clientSession.ProcessResponseToken(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs));
-		var serverKey = serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
-		clientSession.ProcessConfirmAck(GateFrameCodec.EncryptFrame(SessionFrameCipherFactory.Create(TestCipherId, serverKey), [TestCipherId]));
+		serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
+		// The ack is the first gate → client frame: encrypted with the gate → client key, sequence 0.
+		clientSession.ProcessConfirmAck(GateFrameCodec.EncryptFrame(
+			SessionFrameCipherFactory.Create(TestCipherId, serverSession.GateToClientKey!), [TestCipherId], 0));
 
 		clientSession.IsCompleted.Should().BeTrue();
-		clientSession.SessionKey.Should().NotBeNull();
-		clientSession.SessionKey.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
-		serverSession.SessionKey.Should().Equal(clientSession.SessionKey);
+		clientSession.ClientToGateKey.Should().NotBeNull();
+		clientSession.ClientToGateKey.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
+		serverSession.ClientToGateKey.Should().Equal(clientSession.ClientToGateKey);
+		serverSession.GateToClientKey.Should().Equal(clientSession.GateToClientKey);
+		// D-5: the two directional keys derived from the same seed must be independent.
+		serverSession.ClientToGateKey.Should().NotBeEquivalentTo(serverSession.GateToClientKey);
 		clientSession.FrameCipher.Should().NotBeNull();
 		serverSession.IsCompleted.Should().BeTrue();
 	}
@@ -46,11 +51,14 @@ public sealed class GateEncryptionHandshakeTests
 
 		var token = serverSession.IssueToken();
 		var confirm = clientSession.ProcessResponseToken(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs));
-		var serverKey = serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
+		serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
 
-		var expected = GateHandshakeCodec.DeriveSessionKey(fixedSeed, TestCipherId, salt);
-		serverKey.Should().Equal(expected);
-		clientSession.SessionKey.Should().Equal(expected);
+		var expected = GateHandshakeCodec.DeriveSessionKey(fixedSeed, TestCipherId, salt, GateKeyDirection.ClientToGate);
+		serverSession.ClientToGateKey.Should().Equal(expected);
+		clientSession.ClientToGateKey.Should().Equal(expected);
+		var expectedGateToClient = GateHandshakeCodec.DeriveSessionKey(fixedSeed, TestCipherId, salt, GateKeyDirection.GateToClient);
+		serverSession.GateToClientKey.Should().Equal(expectedGateToClient);
+		clientSession.GateToClientKey.Should().Equal(expectedGateToClient);
 	}
 
 	[Fact]
@@ -176,7 +184,7 @@ public sealed class GateEncryptionHandshakeTests
 
 		clientSession.ProcessConfirmAck(GateFrameCodec.EncryptFrame(
 			SessionFrameCipherFactory.Create(TestCipherId, GateEncryptionTestHelpers.RandomBytes(32)),
-			[TestCipherId]));
+			[TestCipherId], 0));
 
 		Func<Task> act = () => clientSession.Completion;
 		(await act.Should().ThrowAsync<GateHandshakeException>()).Which.Code.Should().Be(GateHandshakeErrors.AckWithoutKey);
@@ -193,10 +201,10 @@ public sealed class GateEncryptionHandshakeTests
 
 		var token = serverSession.IssueToken();
 		var confirm = clientSession.ProcessResponseToken(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs));
-		_ = serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
+		serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
 		var ack = GateFrameCodec.EncryptFrame(
-			SessionFrameCipherFactory.Create(TestCipherId, serverSession.SessionKey!),
-			[TestCipherId]);
+			SessionFrameCipherFactory.Create(TestCipherId, serverSession.GateToClientKey!),
+			[TestCipherId], 0);
 
 		clientSession.ProcessConfirmAck(ack);
 
@@ -244,7 +252,7 @@ public sealed class GateEncryptionHandshakeTests
 		var clientSession = new GateEncryptionClientSession(keyProvider);
 		var token = serverSession.IssueToken();
 		var confirm = clientSession.ProcessResponseToken(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs));
-		_ = serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
+		serverSession.ProcessConfirmEncryptKey(confirm.AsSpan(1));
 		return (serverSession, clientSession, confirm);
 	}
 }

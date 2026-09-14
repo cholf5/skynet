@@ -3,6 +3,20 @@ using System.Security.Cryptography;
 namespace Skynet.Net.Encryption;
 
 /// <summary>
+/// Direction of the traffic a session key protects. The client seed derives two independent keys — one
+/// per direction (TLS style) — so a key is never used for encryption in both directions and the random
+/// 96-bit nonce collision probability applies to half the frame volume per key.
+/// </summary>
+public enum GateKeyDirection
+{
+	/// <summary>Client to gate traffic (client encrypts, gate decrypts).</summary>
+	ClientToGate = 1,
+
+	/// <summary>Gate to client traffic (gate encrypts, client decrypts).</summary>
+	GateToClient = 2,
+}
+
+/// <summary>
 /// Pure helpers for the gate encryption handshake. Ported from the reference implementation with three
 /// modernizations: the RSA plaintext is a hand-written byte layout instead of a protobuf envelope, the
 /// session key is derived with HKDF-SHA256 instead of SHA1(seed), and the default RSA padding is
@@ -37,14 +51,16 @@ public static class GateHandshakeCodec
 	/// <summary>Default HKDF salt used when no explicit salt is configured.</summary>
 	private static ReadOnlySpan<byte> DefaultSalt => "skynet-gate-hkdf-default-salt/v1"u8;
 
-	private static ReadOnlySpan<byte> InfoPrefix => "skynet-gate-session-key/v1"u8;
+	private static ReadOnlySpan<byte> InfoPrefix => "skynet-gate-session-key/v2"u8;
 
 	/// <summary>
-	/// Derives the session key from the client seed using HKDF-SHA256. The HKDF salt can be overridden by
-	/// deployment configuration; the HKDF info binds the key to the gate protocol version and to the
-	/// negotiated session cipher id, so keys are never reused across cipher choices.
+	/// Derives the directional session key from the client seed using HKDF-SHA256. The HKDF salt can be
+	/// overridden by deployment configuration; the HKDF info binds the key to the gate protocol version,
+	/// the negotiated session cipher id and the traffic direction, so keys are never reused across cipher
+	/// choices or across directions. The same seed must be derived twice (once per direction) by both
+	/// endpoints; each endpoint encrypts with its own direction key and decrypts with the peer's.
 	/// </summary>
-	public static byte[] DeriveSessionKey(ReadOnlySpan<byte> seed, byte cipherId, ReadOnlySpan<byte> salt)
+	public static byte[] DeriveSessionKey(ReadOnlySpan<byte> seed, byte cipherId, ReadOnlySpan<byte> salt, GateKeyDirection direction)
 	{
 		if (seed.Length != SeedByteLength)
 		{
@@ -52,9 +68,10 @@ public static class GateHandshakeCodec
 		}
 
 		var effectiveSalt = salt.IsEmpty ? DefaultSalt : salt;
-		var info = new byte[InfoPrefix.Length + 1];
+		var info = new byte[InfoPrefix.Length + 2];
 		InfoPrefix.CopyTo(info);
-		info[^1] = cipherId;
+		info[^2] = cipherId;
+		info[^1] = (byte)direction;
 		var output = new byte[SessionKeyByteLength];
 		HKDF.DeriveKey(HashAlgorithmName.SHA256, seed, output, effectiveSalt, info);
 		return output;

@@ -33,11 +33,39 @@ public sealed class GateServerEncryptionTests
 			var reply = await client.ReceiveBusinessAsync().ConfigureAwait(false);
 
 			reply.Should().Be("HELLO");
-			// The authentication callback captured the gate-side session key; both endpoints derived the
-			// same key from the seed delivered over RSA.
-			var serverKey = await fixture.SessionKeyTask.WaitAsync(WaitTimeout).ConfigureAwait(false);
-			serverKey.Should().NotBeNull();
-			serverKey.Should().Equal(client.Session.SessionKey);
+				// The authentication callback captured the gate-side client → gate direction key; both
+				// endpoints derived the same directional keys from the seed delivered over RSA.
+				var serverKey = await fixture.SessionKeyTask.WaitAsync(WaitTimeout).ConfigureAwait(false);
+				serverKey.Should().NotBeNull();
+				serverKey.Should().Equal(client.Session.ClientToGateKey);
+		}
+		finally
+		{
+			await client.DisposeAsync().ConfigureAwait(false);
+		}
+	}
+
+	[Fact]
+	public async Task ReplayedFrameIsRejectedAndConnectionClosed()
+	{
+		await using var fixture = await GateFixture.StartAsync(options => options.EnableEncryption = true)
+			.ConfigureAwait(false);
+		var client = fixture.CreateClient();
+
+		try
+		{
+			await client.ConnectAsync().ConfigureAwait(false);
+			await client.HandshakeAsync().ConfigureAwait(false);
+
+			await client.SendBusinessAsync("hello").ConfigureAwait(false);
+			(await client.ReceiveBusinessAsync().ConfigureAwait(false)).Should().Be("HELLO");
+
+			// Replay the exact encrypted frame captured from the wire. The gate must reject it and
+			// close the connection (fail-closed) instead of decrypting and echoing a second time.
+			await client.ResendLastFrameAsync().ConfigureAwait(false);
+			var replayEcho = await client.ReadRawOrNullAsync().ConfigureAwait(false);
+
+			replayEcho.Should().BeNull("a replayed frame must be rejected and the connection closed");
 		}
 		finally
 		{

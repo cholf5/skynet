@@ -16,6 +16,7 @@ internal sealed class GateTestClient(IPEndPoint endpoint, InMemoryGateRsaKeyProv
 {
 	private readonly TcpClient _tcp = new();
 	private NetworkStream? _stream;
+	private byte[]? _lastSentFrame;
 
 	public GateEncryptionClientSession Session { get; private set; } = null!;
 
@@ -55,18 +56,30 @@ internal sealed class GateTestClient(IPEndPoint endpoint, InMemoryGateRsaKeyProv
 		}
 	}
 
-	/// <summary>Encrypts and sends a UTF-8 business payload.</summary>
+	/// <summary>Encrypts and sends a UTF-8 business payload. Remembers the raw encrypted frame for replay tests.</summary>
 	public async Task SendBusinessAsync(string text)
 	{
-		var frame = GateFrameCodec.EncryptFrame(Session.FrameCipher!, Encoding.UTF8.GetBytes(text));
+		var frame = Session.EncryptOutbound(Encoding.UTF8.GetBytes(text));
+		_lastSentFrame = frame;
 		await WriteRawAsync(frame).ConfigureAwait(false);
+	}
+
+	/// <summary>Resends the last raw encrypted frame byte-for-byte (replay simulation for tests).</summary>
+	public async Task ResendLastFrameAsync()
+	{
+		if (_lastSentFrame is null)
+		{
+			throw new InvalidOperationException("No frame has been sent yet.");
+		}
+
+		await WriteRawAsync(_lastSentFrame).ConfigureAwait(false);
 	}
 
 	/// <summary>Receives and decrypts one business frame, returning it as UTF-8 text.</summary>
 	public async Task<string> ReceiveBusinessAsync()
 	{
 		var raw = await ReadRawOrThrowAsync().ConfigureAwait(false);
-		var plaintext = GateFrameCodec.DecryptFrame(Session.FrameCipher!, raw);
+		var plaintext = Session.DecryptInbound(raw);
 		return Encoding.UTF8.GetString(plaintext);
 	}
 

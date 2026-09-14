@@ -14,14 +14,14 @@ public sealed class GateHandshakeCodecTests
 		var seed = GateEncryptionTestHelpers.CreateFixedSeed();
 		var salt = GateEncryptionTestHelpers.RandomBytes(16);
 
-		var derived = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, salt);
+		var derived = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, salt, GateKeyDirection.ClientToGate);
 
 		var expected = HKDF.DeriveKey(
 			HashAlgorithmName.SHA256,
 			seed,
 			GateHandshakeCodec.SessionKeyByteLength,
 			salt,
-			CombineInfoPrefix(TestCipherId));
+			CombineInfoPrefix(TestCipherId, GateKeyDirection.ClientToGate));
 		derived.Should().Equal(expected);
 		derived.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
 	}
@@ -31,7 +31,7 @@ public sealed class GateHandshakeCodecTests
 	{
 		var seed = GateEncryptionTestHelpers.CreateFixedSeed();
 
-		var withEmptySalt = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, ReadOnlySpan<byte>.Empty);
+		var withEmptySalt = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, ReadOnlySpan<byte>.Empty, GateKeyDirection.ClientToGate);
 
 		withEmptySalt.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
 	}
@@ -42,18 +42,33 @@ public sealed class GateHandshakeCodecTests
 		var seed = GateEncryptionTestHelpers.CreateFixedSeed();
 		var salt = GateEncryptionTestHelpers.RandomBytes(16);
 
-		var keyA = GateHandshakeCodec.DeriveSessionKey(seed, 0x01, salt);
-		var keyB = GateHandshakeCodec.DeriveSessionKey(seed, 0x02, salt);
-		var keyC = GateHandshakeCodec.DeriveSessionKey(seed, 0x01, GateEncryptionTestHelpers.RandomBytes(16));
+		var keyA = GateHandshakeCodec.DeriveSessionKey(seed, 0x01, salt, GateKeyDirection.ClientToGate);
+		var keyB = GateHandshakeCodec.DeriveSessionKey(seed, 0x02, salt, GateKeyDirection.ClientToGate);
+		var keyC = GateHandshakeCodec.DeriveSessionKey(seed, 0x01, GateEncryptionTestHelpers.RandomBytes(16), GateKeyDirection.ClientToGate);
 
 		keyA.Should().NotBeEquivalentTo(keyB);
 		keyA.Should().NotBeEquivalentTo(keyC);
 	}
 
 	[Fact]
+	public void DeriveSessionKeySeparatesDirections()
+	{
+		// D-5: the same seed must yield two independent keys so no key ever encrypts in both directions.
+		var seed = GateEncryptionTestHelpers.CreateFixedSeed();
+		var salt = GateEncryptionTestHelpers.RandomBytes(16);
+
+		var clientToGate = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, salt, GateKeyDirection.ClientToGate);
+		var gateToClient = GateHandshakeCodec.DeriveSessionKey(seed, TestCipherId, salt, GateKeyDirection.GateToClient);
+
+		clientToGate.Should().NotBeEquivalentTo(gateToClient);
+		clientToGate.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
+		gateToClient.Should().HaveCount(GateHandshakeCodec.SessionKeyByteLength);
+	}
+
+	[Fact]
 	public void DeriveSessionKeyRejectsWrongSeedLength()
 	{
-		var act = () => GateHandshakeCodec.DeriveSessionKey(new byte[15], TestCipherId, ReadOnlySpan<byte>.Empty);
+		var act = () => GateHandshakeCodec.DeriveSessionKey(new byte[15], TestCipherId, ReadOnlySpan<byte>.Empty, GateKeyDirection.ClientToGate);
 		act.Should().Throw<ArgumentException>();
 	}
 
@@ -146,12 +161,13 @@ public sealed class GateHandshakeCodecTests
 		source.GetSeedBytes(16).Should().HaveCount(16);
 	}
 
-	private static byte[] CombineInfoPrefix(byte cipherId)
+	private static byte[] CombineInfoPrefix(byte cipherId, GateKeyDirection direction)
 	{
-		var prefix = "skynet-gate-session-key/v1"u8.ToArray();
-		var info = new byte[prefix.Length + 1];
+		var prefix = "skynet-gate-session-key/v2"u8.ToArray();
+		var info = new byte[prefix.Length + 2];
 		prefix.CopyTo(info, 0);
-		info[^1] = cipherId;
+		info[^2] = cipherId;
+		info[^1] = (byte)direction;
 		return info;
 	}
 }

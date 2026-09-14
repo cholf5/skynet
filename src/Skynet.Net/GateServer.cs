@@ -553,15 +553,15 @@ public sealed class GateServer : IAsyncDisposable
 			return true;
 		}
 
-		if (!await RunAuthenticationAsync(metadata, step.SessionKey, cancellationToken).ConfigureAwait(false))
+		if (!await RunAuthenticationAsync(metadata, step.ClientToGateKey, cancellationToken).ConfigureAwait(false))
 		{
 			await TrySendErrorFrameAsync(connection, GateHandshakeErrors.AuthRejected).ConfigureAwait(false);
 			_logger.LogInformation("Session {SessionId} rejected by the authentication callback.", metadata.SessionId);
 			return false;
 		}
 
-		pipeline.Activate(step.SessionKey!);
-		var secureConnection = new EncryptedSessionConnection(connection, pipeline.Cipher!);
+		pipeline.Activate(step.ClientToGateKey!, step.GateToClientKey!);
+		var secureConnection = new EncryptedSessionConnection(connection, pipeline);
 		lifetime.Runtime = await CreateSessionRuntimeAsync(secureConnection, metadata, cancellationToken).ConfigureAwait(false);
 		_sessions[metadata.SessionId] = lifetime.Runtime;
 		lifetime.IdleTask = MonitorIdleAsync(lifetime.Runtime, idleToken);

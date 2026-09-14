@@ -13,7 +13,10 @@ internal sealed class GateSessionPipeline
 {
 	private readonly GateEncryptionServerSession? _handshake;
 	private readonly byte _cipherId;
-	private ISessionFrameCipher? _cipher;
+	private readonly GateReplayWindow _receiveWindow = new();
+	private ISessionFrameCipher? _decryptCipher;
+	private ISessionFrameCipher? _encryptCipher;
+	private ulong _sendSequence;
 
 	private GateSessionPipeline(GateEncryptionServerSession? handshake, byte cipherId)
 	{
@@ -38,18 +41,15 @@ internal sealed class GateSessionPipeline
 	public bool RequiresHandshake => _handshake is not null;
 
 	/// <summary>Gets a value indicating whether business frames may be processed.</summary>
-	public bool IsReadyForBusiness => _handshake is null || _cipher is not null;
-
-	/// <summary>Gets the activated frame cipher; null until <see cref="Activate"/> is called.</summary>
-	public ISessionFrameCipher? Cipher => _cipher;
+	public bool IsReadyForBusiness => _handshake is null || _decryptCipher is not null;
 
 	/// <summary>Gets the handshake session; null in plaintext mode.</summary>
 	public GateEncryptionServerSession? Handshake => _handshake;
 
 	/// <summary>
 	/// Processes one frame while the handshake is still pending. Returns the outbound response frame and/or
-	/// the derived session key. Throws <see cref="GateHandshakeException"/> with a stable code on any
-	/// protocol violation.
+	/// the derived directional session keys. Throws <see cref="GateHandshakeException"/> with a stable code
+	/// on any protocol violation.
 	/// </summary>
 	public GateHandshakeStep ProcessHandshakeFrame(ReadOnlyMemory<byte> payload)
 	{
@@ -64,12 +64,12 @@ internal sealed class GateSessionPipeline
 			case GateFrameType.HandshakeRequestToken:
 			{
 				var token = _handshake!.IssueToken();
-				return new GateHandshakeStep(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs), null);
+				return new GateHandshakeStep(GateFrameCodec.EncodeResponseToken(token.Token, token.ExpireUnixMs), null, null);
 			}
 			case GateFrameType.HandshakeConfirmKey:
 			{
-				var sessionKey = _handshake!.ProcessConfirmEncryptKey(span[1..]);
-				return new GateHandshakeStep(null, sessionKey);
+				_handshake!.ProcessConfirmEncryptKey(span[1..]);
+				return new GateHandshakeStep(null, _handshake.ClientToGateKey, _handshake.GateToClientKey);
 			}
 			default:
 			{
@@ -80,38 +80,55 @@ internal sealed class GateSessionPipeline
 		}
 	}
 
-	/// <summary>Activates the session cipher with the derived session key (after authentication succeeded).</summary>
-	public void Activate(byte[] sessionKey)
+	/// <summary>
+	/// Activates the directional session ciphers (after authentication succeeded): the client → gate key
+	/// decrypts inbound frames, the gate → client key encrypts outbound frames.
+	/// </summary>
+	public void Activate(byte[] clientToGateKey, byte[] gateToClientKey)
 	{
-		_cipher = SessionFrameCipherFactory.Create(_cipherId, sessionKey);
+		_decryptCipher = SessionFrameCipherFactory.Create(_cipherId, clientToGateKey);
+		_encryptCipher = SessionFrameCipherFactory.Create(_cipherId, gateToClientKey);
+	}
+
+	/// <summary>
+	/// Encrypts one outbound frame with the gate → client key, stamping the next send sequence number.
+	/// Also used for the ConfirmEncryptKeyAck, which is the first gate → client frame (sequence 0).
+	/// </summary>
+	public byte[] EncryptOutbound(ReadOnlySpan<byte> plaintext)
+	{
+		return GateFrameCodec.EncryptFrame(_encryptCipher!, plaintext, _sendSequence++);
 	}
 
 	/// <summary>Builds the encrypted ConfirmEncryptKeyAck frame whose plaintext is the negotiated cipher id.</summary>
 	public byte[] BuildConfirmAck()
 	{
-		return GateFrameCodec.EncryptFrame(_cipher!, [(byte)_handshake!.CipherId]);
+		return EncryptOutbound([(byte)_handshake!.CipherId]);
 	}
 
 	/// <summary>
-	/// Decrypts one post-handshake frame. Plaintext mode returns the payload unchanged; encrypted mode
-	/// throws <see cref="CryptographicException"/> on malformed or inauthentic frames.
+	/// Decrypts one post-handshake frame through the receive replay window. Plaintext mode returns the
+	/// payload unchanged; encrypted mode throws <see cref="CryptographicException"/> on malformed frames,
+	/// replays and inauthentic frames.
 	/// </summary>
 	public byte[] DecryptInbound(byte[] payload)
 	{
-		if (_cipher is null)
+		if (_decryptCipher is null)
 		{
 			return payload;
 		}
 
-		return GateFrameCodec.DecryptFrame(_cipher, payload);
+		return GateFrameCodec.DecryptFrame(_decryptCipher, payload, _receiveWindow);
 	}
 }
 
 /// <summary>
-/// Wraps a session connection so every outbound payload is encrypted with the session cipher. Used as the
-/// <see cref="ISessionConnection"/> handed to the session actor once the handshake completed.
+/// Wraps a session connection so every outbound payload is encrypted with the gate → client direction key
+/// and stamped with the pipeline send sequence counter. Used as the <see cref="ISessionConnection"/> handed
+/// to the session actor once the handshake completed. Single-thread by contract: the session actor
+/// serializes sends, and the ack (sent by the receive loop before the actor processes any message) already
+/// consumed sequence 0.
 /// </summary>
-internal sealed class EncryptedSessionConnection(ISessionConnection inner, ISessionFrameCipher cipher) : ISessionConnection
+internal sealed class EncryptedSessionConnection(ISessionConnection inner, GateSessionPipeline pipeline) : ISessionConnection
 {
 	public System.Net.EndPoint? RemoteEndPoint => inner.RemoteEndPoint;
 
@@ -119,7 +136,7 @@ internal sealed class EncryptedSessionConnection(ISessionConnection inner, ISess
 
 	public async ValueTask SendAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
 	{
-		var frame = GateFrameCodec.EncryptFrame(cipher, payload.Span);
+		var frame = pipeline.EncryptOutbound(payload.Span);
 		await inner.SendAsync(frame, cancellationToken).ConfigureAwait(false);
 	}
 
