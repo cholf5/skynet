@@ -119,6 +119,13 @@ public sealed class GateServerOptions
 	public Func<GateAuthenticationContext, CancellationToken, ValueTask<bool>>? AuthCallback { get; set; }
 
 	/// <summary>
+	/// Gets or sets the optional rate limiting hook. When set, <see cref="GateServer"/> consults it for
+	/// every accepted connection and every inbound frame (handshake frames included); <c>null</c> keeps
+	/// the gate rate-limit free. See <see cref="TokenBucketGateRateLimiter"/> for a default implementation.
+	/// </summary>
+	public IGateRateLimiter? RateLimiter { get; set; }
+
+	/// <summary>
 	/// Validates the configuration and throws if invalid.
 	/// </summary>
 	public void Validate()
