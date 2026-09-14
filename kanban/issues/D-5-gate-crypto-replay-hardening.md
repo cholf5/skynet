@@ -38,3 +38,12 @@ C-6 的 AES-256-GCM 帧加密算法选型正确，但存在流密码时代遗留
 - `src/Skynet.Net/Encryption/GateFrameCodec.cs`、`ISessionFrameCipher.cs`、`GateSessionPipeline.cs`、`GateHandshakeCodec.cs`
 - `tests/Skynet.Net.Tests/Encryption/`
 - `docs/gate-encryption.md`
+
+## Review 记录
+
+- **规格审查**：✅ 通过。GateReplayWindow 独立推演正确（位图右移含 shift=0 下溢点专项验证、mark-after-auth 两场景：合法帧重放被拒/伪造帧认证失败不烧槽、ulong 回绕 fail-closed）；方向密钥双端闭合（客户端 EncryptOutbound/DecryptInbound 与服务端 GateSessionPipeline 完全镜像，ack 占 g2c seq 0）；既有 5 个测试文件逐 hunk 确认无断言弱化（还新增了双 key 独立性断言）；AAD 恰为 8B 序号、nonce 未混用；明文路径零改动；红绿验证为真 e2e（ResendLastFrameAsync 重放线上原始字节，非重新加密）；独立复跑 198 绿。
+- **质量审查**：✅ 首轮批准，无 Critical/Important。亮点：stackalloc 仅在同步方法、解密路径零分配；`GateAuthenticationContext.SessionKey` 语义变更注释足以防误用（且误用会被 AEAD fail-closed 拦截）；文档生日界推导准确。
+- **修复（58857f0）**：Minor 1 缩进回归修正；Minor 2 `ShiftBitmap` 全清判断改 `shift >= (ulong)WindowSize`（更紧）+ `MarkSeen` 补前置条件注释。
+- **合入**：分支 `task/d5-gate-crypto-replay-hardening`（d63cd5d + 58857f0）已 merge 到 main。
+- **遗留（归后续卡片）**：窗口大小 [64,1024] 非 2 的幂的文档表述；`GateEncryptionClientSession.FrameCipher` 公开暴露可绕过计数器（后续收窄 internal）；`ISessionFrameCipher` 的 `associatedData = default` 默认值（未来改必填）；ReplayWindow 边界测试补 1025/64/1024。
+- **协议影响**：wire v2 info + 帧格式变更 = **加密 Gate 的 wire break**（旧客户端/网关互操作将在解密处 fail-closed 断连，可诊断）；因握手每连接实时协商，不存在混合版本持久会话。

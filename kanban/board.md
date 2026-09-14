@@ -1,7 +1,7 @@
 # Kanban Board
 
 ## Backlog
-- [ ] [D-5 Gate 加密：重放防护与方向密钥分离](issues/D-5-gate-crypto-replay-hardening.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## To Do
 - _None_
@@ -19,6 +19,7 @@
 - _None_
 
 ## Done
+- [x] [D-5 Gate 加密：重放防护与方向密钥分离](issues/D-5-gate-crypto-replay-hardening.md) — Owner: AI Agent — Complexity: M
 - [x] [D-8 KCP 传输拆分为独立工程 Skynet.Transport.Kcp](issues/D-8-split-kcp-transport-project.md) — Owner: AI Agent — Complexity: S
 - [x] [D-7 P2 零散修复批（17 项）](issues/D-7-p2-batch-fixes.md) — Owner: AI Agent — Complexity: S
 - [x] [D-6 contract id 边界加固](issues/D-6-contract-id-edge-hardening.md) — Owner: AI Agent — Complexity: S
