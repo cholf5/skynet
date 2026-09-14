@@ -2,8 +2,6 @@
 
 ## Backlog
 - [ ] [D-5 Gate 加密：重放防护与方向密钥分离](issues/D-5-gate-crypto-replay-hardening.md) — Owner: AI Agent — Complexity: M
-- [ ] [D-6 contract id 边界加固](issues/D-6-contract-id-edge-hardening.md) — Owner: AI Agent — Complexity: S
-- [ ] [D-7 P2 零散修复批](issues/D-7-p2-batch-fixes.md) — Owner: AI Agent — Complexity: S
 - [ ] [D-8 KCP 传输拆分为独立工程 Skynet.Transport.Kcp](issues/D-8-split-kcp-transport-project.md) — Owner: AI Agent — Complexity: S
 
 ## To Do
@@ -22,6 +20,8 @@
 - _None_
 
 ## Done
+- [x] [D-7 P2 零散修复批（17 项）](issues/D-7-p2-batch-fixes.md) — Owner: AI Agent — Complexity: S
+- [x] [D-6 contract id 边界加固](issues/D-6-contract-id-edge-hardening.md) — Owner: AI Agent — Complexity: S
 - [x] [D-3 KcpTransport 加固对齐（默认死链检测 + 入站会话治理）](issues/D-3-kcp-transport-hardening.md) — Owner: AI Agent — Complexity: M
 - [x] [D-4 Actor 重入语义决策（await CallAsync 挂起 mailbox 循环）](issues/D-4-actor-reentrancy-semantics.md) — Owner: AI Agent — Complexity: S
 - [x] [D-2 TcpTransport 并发遗留三连（ABA 删除 / 连接失败 fail-fast / MessageId 撞车）](issues/D-2-tcp-transport-concurrency-leftovers.md) — Owner: AI Agent — Complexity: M

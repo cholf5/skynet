@@ -25,6 +25,9 @@
 12. **（D-3 审查遗留）`_retiredConversations` 注释与事实不符**：`KcpTransport.cs:298-299` 声称"cannot grow without bound"但过期条目仅在该 conv 再有包到达时移除——改注释为准确描述，或加机会式清扫（条目超阈值时遍历剔除过期项）。
 13. **（D-3 审查遗留）`KcpTransport.DisposeAsync` 的 `_disposed` 仍是裸 bool check-then-act**（`KcpTransport.cs:639-644`）——对齐 `KcpConnection` 已有的 `Interlocked.Exchange` 模式；顺带删 `KcpTransportTests.cs:604-607` 恒等包装 `GetConversationId`。
 14. **（D-3 审查遗留）死链测试的固定等待**：`KcpTransportTests.cs:447` 的 `Task.Delay(200)` 改 `WaitForConditionAsync(() => transport2!._pendingCalls.Count == 1, ...)` 消除理论竞态。
+15. **（D-6 审查遗留）响应帧 unknown contract 本地快速失败**：对端注册了本端不认识的响应 payload 类型时，当前丢帧、本端 pending 走超时；本端握有 MessageId + IsResponse，可本地直接 fail pending（零回环风险），RTT 级别收敛为即时失败。TCP/KCP 对称实现。
+16. **（D-6 审查遗留）测试小项**：KCP 负断言去掉 2s 固定 sleep、匹配串从裸 `"888"` 收窄为 `"Rejected KCP envelope" + contract id` 组合（node1 挂 RecordingLoggerFactory）；`MessageEnvelopeSerializerTests.CreateDto` 硬编码 `version = 3` 改引用 `MessageEnvelopeSerializer.WireVersion`。
+17. **（D-6 审查遗留）fault 发送 token 统一**：`TcpTransport.cs:511` / `KcpTransport.cs:634` 的 fault 发送用 `CancellationToken.None`，与 `SendResponseAsync` 的 `_cts.Token` 不一致（有 catch 兜底，安全但不一致）。
 
 ## 验收标准
 
@@ -37,6 +40,15 @@
 2. start hook 抛异常的 actor：Call 在短时间内收到包含启动异常的失败。
 3. 并发触发两次 `ConnectionRestored` → 对账日志仅一份 added/removed 计数。
 4. void 代理向已 dispose 的 system 发送 → 观测钩子收到异常记录。
+
+## Review 记录
+
+- **规格审查**：✅ 通过。17 项逐项核验（16 修复 + 第 6 项跳过成立：改 ReadOnlyMemory 需动 vendored kcp2k 与 PumpOperation，风险大于收益）；行为改动重点验证（生成模板单一改动覆盖所有 proxy、TryComplete+排空顺序论证、Redis 0/1/2 状态机推演、TCP/KCP 响应帧快速失败对称）；diff 卫生（TcpTransport +40/-12 无夹带、BOM/CRLF 干净）；独立复跑 184 绿。两个非阻塞缺口（SendEnqueueFailed 并发文档、TokenExpireUnixMs 无测试）已由实现者补齐（2ad2907）。
+- **质量审查第一轮**：需修复后批准。Important 1：`OnSendEnqueueFailed` 的 handler 抛异常会逃逸为未观察任务异常（本项修复初衷即消除它）且跳过后续 handler。Minor 2/3/4 顺手项。
+- **修复（a9ba0d1）**：Important 1 的修法有一处必要修正——审查建议的单块 try/catch 包 multicast `Invoke` **无法阻止跳过后续 handler**（同一 multicast Invoke 内执行），实现者改用 `GetInvocationList()` 逐 handler 隔离（回归测试先以整块实现，5s 超时抓住问题后改为逐个调用）。Minor 2（OCE 走 TrySetCanceled）、3（排空消息补 OnMessageProcessed 指标，OCE 记 true/异常记 false 对齐正常路径双语义）、4（删死字段）全部落实。
+- **复审**：协调者抽查 diff 通过（质量审查者授权"修复后抽查三处即可"）。
+- **合入**：分支 `task/d7-p2-batch-fixes`（8b266c1 + be74788 + 439b04a + 2ad2907 + a9ba0d1）已 merge 到 main。
+- **遗留（归后续小卡）**：ActorRef 整文件历史坏缩进顺修；WhenAny 注释措辞收敛；OnlyOnCanceled 文档；transport 校验风格最终统一（ctor 内联 vs options.Validate()）。
 
 ## 相关文件
 
