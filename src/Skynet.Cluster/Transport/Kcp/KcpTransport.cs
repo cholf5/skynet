@@ -601,6 +601,47 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		}
 	}
 
+	/// <summary>
+	/// Handles an envelope whose payload contract id is not registered on this node. Request frames
+	/// that expect a response (<c>CallType.Call</c>) are answered with a
+	/// <see cref="KcpRemoteCallFault"/> so the caller's pending call fails at RTT speed instead of
+	/// hanging until the session dies; every other frame is silently dropped. Response frames are
+	/// never answered: a fault we cannot read must not trigger another fault, or two peers with
+	/// mismatched contract sets would loop forever on each other's fault responses. Mirrors
+	/// <see cref="TcpTransport.HandleUnknownPayloadContractAsync"/>.
+	/// </summary>
+	internal async Task HandleUnknownPayloadContractAsync(KcpConnection connection, MessageEnvelope request,
+		int contractId)
+	{
+		_logger.LogError(
+			"Rejected KCP envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
+			connection.RemoteNodeId, contractId);
+
+		if (request.IsResponse || request.CallType != CallType.Call)
+		{
+			// Fire-and-forget requests leave no pending call on the peer to fail fast, and
+			// answering a response (possibly an unreadable fault) would create a fault loop.
+			return;
+		}
+
+		var fault = new KcpRemoteCallFault(
+			IsCancellation: false,
+			ExceptionType: typeof(UnknownPayloadContractException).FullName ?? "UnknownPayloadContractException",
+			Message: $"Payload contract id {contractId} is not registered on this node; the request was dropped. " +
+				"Ensure all nodes share the same contract assembly and register the payload type.");
+		try
+		{
+			await connection.SendEnvelopeAsync(request.WithResponse(fault), CancellationToken.None)
+				.ConfigureAwait(false);
+		}
+		catch (Exception exception)
+		{
+			_logger.LogWarning(exception,
+				"Failed to transmit the unknown-contract fault for message {MessageId} to node {NodeId}.",
+				request.MessageId, connection.RemoteNodeId);
+		}
+	}
+
 	private async Task SendResponseAsync(KcpConnection connection, MessageEnvelope request, Task<object?> responseTask)
 	{
 		MessageEnvelope response;

@@ -135,6 +135,44 @@ Both transports share the envelope contract-id serialization, so payload types r
 node work over either transport. They do not share fault payload types (each transport declares its
 own private fault record), which is invisible to application code.
 
+## Payload contract ids and unknown-contract behavior
+
+Envelopes carry an `int` payload contract id instead of a type name; ids are the FNV-1a hash of the
+payload type's `Type.FullName` (see `PayloadContractRegistry`). This bakes in one deployment
+premise and defines what happens when it is violated.
+
+### Deployment premise: every node loads the same contract assembly
+
+All nodes in the cluster must load the same payload contract definitions (the same
+`[SkynetActor]`-generated registration code, or explicit `PayloadContractRegistry.Register<T>()`
+calls). A node that is missing a contract cannot deserialize incoming payloads of that type.
+
+Because ids are derived from `Type.FullName`, payload types must be **concrete named types**.
+Constructed generic types (`List<int>`, `Task<List<int>>`, ...) — including arrays of them
+(`List<int>[]`) and non-generic types nested inside constructed generics — embed assembly-qualified
+generic arguments with runtime version and public key in their full name, so two nodes on different
+runtime versions or TFMs would hash *different* ids for the same payload. The registry rejects such
+types at registration time (startup for generated contracts, first send for ad-hoc payloads) with
+`PayloadContractTypeNotSupportedException`. Define an explicit named wrapper type for collections or
+generic containers and register that type as the contract.
+
+### Unknown contract id on the wire
+
+When a node receives an envelope whose payload contract id is not registered:
+
+- The frame is rejected and **the connection/session stays alive**; healthy traffic continues.
+- If the frame is a *request* (`CallType.Call`), the receiver answers with a fault response (its own
+  transport's `RemoteCallFault`/`KcpRemoteCallFault`, same `MessageId`, `IsResponse = true`). The
+  initiator's pending call then fails immediately with `RpcDispatchException` — at RTT speed, not
+  after a disconnect or timeout. Fire-and-forget (`CallType.Send`) frames are just dropped: there is
+  no pending call to fail fast on the peer.
+- Frames that cannot be parsed at all (malformed envelope bytes, or payload bytes that do not fit
+  the resolved type) are dropped without any reply. Fault responses are never answered either: a
+  fault a node cannot read must not trigger another fault, or two nodes with mismatched contract
+  sets would loop forever on each other's fault frames.
+- Legacy wire versions (below 3) still tear the connection down so mixed-version clusters fail
+  loudly instead of silently losing traffic.
+
 ## Third-party notice
 
 `src/Skynet.Cluster/Transport/Kcp/ThirdParty/kcp2k/` contains the vendored managed KCP core from

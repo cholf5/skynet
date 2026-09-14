@@ -354,6 +354,311 @@ result.Should().Be("echo:pong");
 	}
 
 	[Fact]
+	public async Task TcpTransport_ShouldSendFaultResponseWhenRequestContractIdUnknown()
+	{
+		// The mirror image of the drop-and-keep-alive test above: a raw peer sends a Call whose
+		// payload contract id is unknown to node1. Node1 must answer with a RemoteCallFault
+		// response (same MessageId) so the peer's pending call can fail fast, and the connection
+		// must stay usable.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000, ("echo", 1001)) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await system.CreateActorAsync(() => new EchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, port);
+		var stream = client.GetStream();
+		await WriteFrameAsync(stream, 0x01, MessagePackSerializer.Serialize(new HandshakePayload("raw-node")));
+		await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+
+		var unknownCall = new SerializedMessageEnvelope
+		{
+			MessageId = 1,
+			From = 2,
+			To = 1001,
+			CallType = CallType.Call,
+			PayloadContractId = 555123456,
+			Payload = new byte[] { 1 },
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion
+		};
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(unknownCall));
+
+		var (faultType, faultPayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+		faultType.Should().Be(0x02);
+		var faultResponse = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(faultPayload);
+		faultResponse.IsResponse.Should().BeTrue("the fault must be routed as a response");
+		faultResponse.MessageId.Should().Be(unknownCall.MessageId, "the fault must match the caller's pending call");
+		PayloadContractRegistry.TryResolve(faultResponse.PayloadContractId, out var faultPayloadType).Should().BeTrue();
+		faultPayloadType.Should().Be(typeof(TcpTransport.RemoteCallFault));
+		var fault = (TcpTransport.RemoteCallFault)MessagePackSerializer.Deserialize(faultPayloadType!, faultResponse.Payload)!;
+		fault.IsCancellation.Should().BeFalse();
+		fault.Message.Should().Contain("555123456", "the fault must name the unresolvable contract id");
+
+		// The connection stayed alive: a well-formed call on the same connection is still answered.
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+		{
+			MessageId = 3,
+			From = 2,
+			To = 1001,
+			CallType = CallType.Call,
+			PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(EchoRequest)),
+			Payload = MessagePackSerializer.Serialize(new EchoRequest("ping")),
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion
+		}));
+
+		var (responseType, responsePayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+		responseType.Should().Be(0x02);
+		var response = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(responsePayload);
+		PayloadContractRegistry.TryResolve(response.PayloadContractId, out var responsePayloadType).Should().BeTrue();
+		MessagePackSerializer.Deserialize(responsePayloadType!, response.Payload).Should().Be("echo:pong");
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldFailFastWithFaultWhenRemoteNodeMissesContract()
+	{
+		// Node1 calls a handle on node2, where node2 is a raw socket peer. The raw peer answers the
+		// call with a RemoteCallFault response (as produced by an unknown-contract receiver). The
+		// caller must fail fast with RpcDispatchException instead of hanging, the pending call must
+		// be drained, and the connection must stay usable for a follow-up call.
+		var (port1, port2) = (GetFreePort(), GetFreePort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				CreateNodeConfiguration("node1", port1, 1000),
+				CreateNodeConfiguration("node2", port2, 2000, ("ghost", 2001))
+			}
+		};
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+
+		TcpTransport? transport1 = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport1 = new TcpTransport(sys, registry1, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+
+		using var listener = new TcpListener(IPAddress.Loopback, port2);
+		listener.Start();
+
+		// Raw node2: complete the handshake, answer the first call with a fault and the second with
+		// a regular response — both tagged with the caller's own MessageId.
+		var peerTask = Task.Run(async () =>
+		{
+			var server = await listener.AcceptTcpClientAsync();
+			var stream = server.GetStream();
+			var (handshakeType, _) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+			handshakeType.Should().Be(0x01);
+			await WriteFrameAsync(stream, 0x01,
+				MessagePackSerializer.Serialize(new TcpTransport.ClusterHandshake("raw-node2")));
+
+			var (callType, callPayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+			callType.Should().Be(0x02);
+			var call = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(callPayload);
+			await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+			{
+				MessageId = call.MessageId,
+				From = call.To,
+				To = call.From,
+				CallType = CallType.Call,
+				PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(TcpTransport.RemoteCallFault)),
+				Payload = MessagePackSerializer.Serialize(
+					new TcpTransport.RemoteCallFault(false, "UnknownPayloadContractException", "fault:boom")),
+				TraceId = null,
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				TimeToLiveTicks = null,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			}));
+
+			var (call2Type, call2Payload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+			call2Type.Should().Be(0x02);
+			var call2 = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(call2Payload);
+			await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+			{
+				MessageId = call2.MessageId,
+				From = call2.To,
+				To = call2.From,
+				CallType = CallType.Call,
+				PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(string)),
+				Payload = MessagePackSerializer.Serialize("raw:pong"),
+				TraceId = null,
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				TimeToLiveTicks = null,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			}));
+		});
+
+		var faultedCall = system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("ping"),
+			TimeSpan.FromSeconds(10));
+		Func<Task> act = async () => await faultedCall;
+		(await act.Should().ThrowAsync<RpcDispatchException>().WaitAsync(TimeSpan.FromSeconds(5)))
+			.Which.Message.Should().Contain("fault:boom", "the remote fault message must reach the caller");
+		transport1!._pendingCalls.Should().BeEmpty("the fault must drain the pending call");
+
+		// The connection survived the fault: a follow-up call roundtrips normally.
+		var secondCall = await system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("again"),
+			TimeSpan.FromSeconds(10));
+		secondCall.Should().Be("raw:pong");
+		await peerTask;
+	}
+
+	[Fact]
+	public async Task TcpTransport_ShouldNotReplyWithFaultToUnresolvableFaultResponse()
+	{
+		// Fault-loop guard: a response frame whose payload contract id cannot be resolved (e.g. a
+		// fault from a peer whose fault type we do not know) must be dropped silently. Replying to
+		// it would make two mismatched peers loop forever on each other's fault frames.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000, ("echo", 1001)) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await system.CreateActorAsync(() => new EchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, port);
+		var stream = client.GetStream();
+		await WriteFrameAsync(stream, 0x01, MessagePackSerializer.Serialize(new HandshakePayload("raw-node")));
+		await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+		{
+			MessageId = 42,
+			From = 1001,
+			To = 2,
+			CallType = CallType.Call,
+			PayloadContractId = 555123457,
+			Payload = new byte[] { 1 },
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion,
+			IsResponse = true
+		}));
+
+		// No fault response may come back for an unreadable fault response.
+		Func<Task> read = () => ReadFrameAsync(stream, TimeSpan.FromSeconds(1));
+		await read.Should().ThrowAsync<OperationCanceledException>("an unresolvable fault response must be dropped silently");
+
+		// The connection stayed alive and loop-free: a well-formed call is still answered.
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+		{
+			MessageId = 3,
+			From = 2,
+			To = 1001,
+			CallType = CallType.Call,
+			PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(EchoRequest)),
+			Payload = MessagePackSerializer.Serialize(new EchoRequest("ping")),
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion
+		}));
+
+		var (responseType, responsePayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+		responseType.Should().Be(0x02);
+		var response = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(responsePayload);
+		PayloadContractRegistry.TryResolve(response.PayloadContractId, out var responsePayloadType).Should().BeTrue();
+		MessagePackSerializer.Deserialize(responsePayloadType!, response.Payload).Should().Be("echo:pong");
+	}
+
+	[Fact]
+	public async Task TcpTransport_ShouldDropFrameWithUnreadablePayloadWithoutFaultLoop()
+	{
+		// A frame whose payload bytes do not fit the resolved contract type (a corrupted fault
+		// response, say) must be dropped without a reply and without tearing the connection down.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000, ("echo", 1001)) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		await system.CreateActorAsync(() => new EchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, port);
+		var stream = client.GetStream();
+		await WriteFrameAsync(stream, 0x01, MessagePackSerializer.Serialize(new HandshakePayload("raw-node")));
+		await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+		{
+			MessageId = 43,
+			From = 1001,
+			To = 2,
+			CallType = CallType.Call,
+			PayloadContractId = PayloadContractRegistry.ComputeContractId("System.String"),
+			Payload = new byte[] { 0xff },
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion,
+			IsResponse = true
+		}));
+
+		// The corrupt frame is dropped: no reply, connection still open.
+		Func<Task> read = () => ReadFrameAsync(stream, TimeSpan.FromSeconds(1));
+		await read.Should().ThrowAsync<OperationCanceledException>("a frame with unreadable payload bytes must be dropped silently");
+
+		await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+		{
+			MessageId = 4,
+			From = 2,
+			To = 1001,
+			CallType = CallType.Call,
+			PayloadContractId = PayloadContractRegistry.GetOrRegister(typeof(EchoRequest)),
+			Payload = MessagePackSerializer.Serialize(new EchoRequest("ping")),
+			TraceId = null,
+			Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+			TimeToLiveTicks = null,
+			Version = MessageEnvelopeSerializer.WireVersion
+		}));
+
+		var (responseType, responsePayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+		responseType.Should().Be(0x02);
+		var response = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(responsePayload);
+		PayloadContractRegistry.TryResolve(response.PayloadContractId, out var responsePayloadType).Should().BeTrue();
+		MessagePackSerializer.Deserialize(responsePayloadType!, response.Payload).Should().Be("echo:pong");
+	}
+
+	[Fact]
 	public async Task CallAsync_BidirectionalConcurrentCalls_ShouldNotCrossMatchPendingCalls()
 	{
 		// Both nodes allocate message ids from their own counters starting at the same value, so a
@@ -612,7 +917,7 @@ result.Should().Be("echo:pong");
 			};
 			await WriteFrameAsync(serverStream, 0x02, MessagePackSerializer.Serialize(stale));
 
-			await WaitForLogAsync(loggerFactory, "Dropped a stale response", TimeSpan.FromSeconds(5));
+			await loggerFactory.WaitForLogAsync("Dropped a stale response", TimeSpan.FromSeconds(5));
 
 			// Give a would-be bogus local delivery ample time to happen, then verify it did not.
 			await Task.Delay(300);
@@ -680,7 +985,7 @@ result.Should().Be("echo:pong");
 
 		// The remote actor keeps processing; its response arrives ~500ms in, after the pending
 		// call was already removed by the cancellation above.
-		await WaitForLogAsync(loggerFactory, "Dropped a stale response", TimeSpan.FromSeconds(5));
+		await loggerFactory.WaitForLogAsync("Dropped a stale response", TimeSpan.FromSeconds(5));
 		await Task.Delay(300);
 		loggerFactory.Messages.Should().NotContain(
 			message => message.Contains("Failed to deliver message", StringComparison.Ordinal),
@@ -736,75 +1041,6 @@ result.Should().Be("echo:pong");
 			MessagePackSerializer.Serialize(new TcpTransport.ClusterHandshake("ghost")));
 		await handshake;
 		return (connection, stream);
-	}
-
-	private static async Task WaitForLogAsync(RecordingLoggerFactory factory, string fragment, TimeSpan timeout)
-	{
-		var deadline = DateTime.UtcNow + timeout;
-		while (DateTime.UtcNow < deadline)
-		{
-			lock (factory.LockObject)
-			{
-				if (factory.Messages.Any(message => message.Contains(fragment, StringComparison.Ordinal)))
-				{
-					return;
-				}
-			}
-
-			await Task.Delay(50);
-		}
-
-		lock (factory.LockObject)
-		{
-			factory.Messages.Should().Contain(message => message.Contains(fragment, StringComparison.Ordinal),
-				$"expected a log entry containing '{fragment}' within {timeout.TotalSeconds}s");
-		}
-	}
-
-	private sealed class RecordingLoggerFactory : ILoggerFactory
-	{
-		internal object LockObject { get; } = new();
-
-		internal List<string> Messages { get; } = new();
-
-		public ILogger CreateLogger(string categoryName) => new RecordingLogger(this);
-
-		public void AddProvider(ILoggerProvider provider)
-		{
-		}
-
-		public void Dispose()
-		{
-		}
-
-		private sealed class RecordingLogger : ILogger
-		{
-			private readonly RecordingLoggerFactory _factory;
-
-			public RecordingLogger(RecordingLoggerFactory factory)
-			{
-				_factory = factory;
-			}
-
-			public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-			public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
-
-			public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-				Func<TState, Exception?, string> formatter)
-			{
-				if (logLevel < LogLevel.Information)
-				{
-					return;
-				}
-
-				var message = formatter(state, exception);
-				lock (_factory.LockObject)
-				{
-					_factory.Messages.Add(message);
-				}
-			}
-		}
 	}
 
 	private static StaticClusterNodeConfiguration CreateNodeConfiguration(string nodeId, int port,

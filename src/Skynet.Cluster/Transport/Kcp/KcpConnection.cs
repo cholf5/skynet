@@ -245,19 +245,31 @@ internal sealed class KcpConnection : IAsyncDisposable
 					Options.SerializerOptions));
 				break;
 			case KcpFrameType.Envelope:
-				MessageEnvelope envelope;
-				try
+				MessageEnvelope? envelope;
+				int unknownContractId;
+				// Unparseable frames return false (dropped below); unknown payload contract ids
+				// come back through unknownContractId. Legacy wire versions throw
+				// NotSupportedException, which faults the pump and closes the session — mixed
+				// version clusters must keep failing loudly.
+				if (!MessageEnvelopeSerializer.TryDeserialize(message.AsMemory(1, message.Length - 1),
+					out envelope, out unknownContractId, Options.SerializerOptions))
 				{
-					envelope = MessageEnvelopeSerializer.Deserialize(message.AsMemory(1, message.Length - 1),
-						Options.SerializerOptions);
+					// The frame is unparseable (it may itself be the peer's fault response). Drop
+					// it and keep the session alive; never reply to a frame we could not read —
+					// that would create a fault loop with a peer that also cannot parse our reply.
+					_logger.LogWarning("Dropped an unparseable KCP envelope frame from node {NodeId}.",
+						_remoteNodeId);
+					return;
 				}
-				catch (UnknownPayloadContractException ex)
+
+				if (unknownContractId != PayloadContractRegistry.NullPayloadContractId)
 				{
 					// A peer with a different contract set sent an unknown payload id. Reject the
-					// frame but keep the session alive for future traffic.
-					_logger.LogError(ex,
-						"Rejected KCP envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
-						_remoteNodeId, ex.ContractId);
+					// frame but keep the session alive; requests that expect a response are
+					// answered with a fault so the caller fails fast instead of hanging until the
+					// session dies. Handled off the pump thread.
+					_ = Task.Run(() => _transport.HandleUnknownPayloadContractAsync(this, envelope,
+						unknownContractId));
 					return;
 				}
 

@@ -107,6 +107,76 @@ public sealed class PayloadContractRegistryTests
 			.Should().BeTrue();
 		intType.Should().Be(typeof(int));
 	}
+
+	[Fact]
+	public void ConstructedGenericFullName_ShouldEmbedAssemblyQualifiedArguments()
+	{
+		// Fixates the researched .NET behavior that motivates the rejection rule below: constructed
+		// generic types embed assembly-qualified argument names (with runtime version and public
+		// key) even when the argument lives in the payload's own assembly. Two nodes on different
+		// runtime versions or TFMs therefore hash different contract ids for the same payload.
+		typeof(List<int>).FullName.Should().Contain("System.Int32, System.Private.CoreLib, Version=");
+		typeof(GenericPayloadWrapper<PayloadContractSample>).FullName.Should().Contain("Version=");
+	}
+
+	[Fact]
+	public void Register_ShouldRejectConstructedGenericPayload()
+	{
+		var act = () => PayloadContractRegistry.Register(typeof(List<int>));
+
+		act.Should().Throw<PayloadContractTypeNotSupportedException>()
+			.Where(exception => exception.PayloadTypeFullName.Contains("System.Collections.Generic.List`1",
+				StringComparison.Ordinal))
+			.Where(exception => exception.Message.Contains("wrapper type", StringComparison.OrdinalIgnoreCase),
+				"the error must tell the user to define an explicit wrapper type");
+	}
+
+	[Fact]
+	public void Register_ShouldRejectArrayOfConstructedGenericPayload()
+	{
+		// The array type itself is not generic, but its full name embeds the element's generic
+		// arguments and drifts the same way.
+		var act = () => PayloadContractRegistry.Register(typeof(List<int>[]));
+
+		act.Should().Throw<PayloadContractTypeNotSupportedException>();
+	}
+
+	[Fact]
+	public void Register_ShouldRejectTypeNestedInConstructedGeneric()
+	{
+		var act = () => PayloadContractRegistry.Register(typeof(GenericPayloadHost<PayloadContractSample>.Payload));
+
+		act.Should().Throw<PayloadContractTypeNotSupportedException>();
+	}
+
+	[Fact]
+	public void GetOrRegister_ShouldRejectConstructedGenericPayload()
+	{
+		var act = () => PayloadContractRegistry.GetOrRegister(typeof(Dictionary<string, int>));
+
+		act.Should().Throw<PayloadContractTypeNotSupportedException>()
+			.Where(exception => exception.PayloadTypeFullName.Contains(
+				"System.Collections.Generic.Dictionary`2", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void Register_ShouldAllowLegalNamedPayloads()
+	{
+		// The rule must not over-reject: arrays of named types, enums, and nested types of named
+		// types have full names that never embed assembly-qualified generic arguments.
+		PayloadContractRegistry.Register<PayloadContractSampleEnum>();
+		PayloadContractRegistry.Register<PayloadContractSample[]>();
+		PayloadContractRegistry.Register<PayloadContractSampleHost.PayloadContractSampleNested>();
+
+		PayloadContractRegistry.TryResolve(
+			PayloadContractRegistry.ComputeContractId("Skynet.Core.Tests.PayloadContractSampleEnum"),
+			out var enumType).Should().BeTrue();
+		enumType.Should().Be(typeof(PayloadContractSampleEnum));
+		PayloadContractRegistry.TryResolve(
+			PayloadContractRegistry.ComputeContractId("Skynet.Core.Tests.PayloadContractSample[]"),
+			out var arrayType).Should().BeTrue();
+		arrayType.Should().Be(typeof(PayloadContractSample[]));
+	}
 }
 
 internal sealed record PayloadContractSample;
@@ -114,3 +184,26 @@ internal sealed record PayloadContractSample;
 internal sealed record PayloadContractConflict;
 
 internal sealed record PayloadContractExplicitId;
+
+internal enum PayloadContractSampleEnum
+{
+	None
+}
+
+internal sealed class GenericPayloadWrapper<T>
+{
+}
+
+internal sealed class GenericPayloadHost<T>
+{
+	internal sealed class Payload
+	{
+	}
+}
+
+internal static class PayloadContractSampleHost
+{
+	internal sealed class PayloadContractSampleNested
+	{
+	}
+}

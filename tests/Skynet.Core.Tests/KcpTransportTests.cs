@@ -180,6 +180,83 @@ public sealed class KcpTransportTests
 	}
 
 	[Fact]
+	public async Task KcpTransport_ShouldFaultAndNotLoopWhenUnknownContractIdReceived()
+	{
+		// node1 receives an injected request frame whose payload contract id is unknown. It must
+		// answer with a fault response over the real KCP session (node2 observes it as a stale
+		// response, since MessageId 777 has no pending call there), must NOT answer an unknown
+		// contract *response* frame with another fault (fault-loop guard), and the session must
+		// stay healthy throughout.
+		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
+		var configuration = CreateConfiguration(port1, port2);
+
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+		await using var system1 = CreateSystem(configuration, "node1");
+		await system1.CreateActorAsync(() => new KcpEchoActor(), "echo",
+			new ActorCreationOptions { HandleOverride = new ActorHandle(1001) });
+
+		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		var loggerFactory2 = new RecordingLoggerFactory();
+		KcpTransport? transport2 = null;
+		await using var system2 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry2 },
+			transportFactory: sys => transport2 = new KcpTransport(sys, registry2, CreateTestOptions(),
+				loggerFactory2));
+
+		// Establish the session with a real roundtrip.
+		var remote = system2.GetByName("echo");
+		(await remote.CallAsync<string>(new KcpEchoRequest("warmup"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:warmup");
+
+		// Inject a request frame with an unknown contract id from node2 towards node1.
+		var connection = transport2!._connections["node1"];
+		await connection.SendFrameAsync(KcpFrameType.Envelope, MessagePackSerializer.Serialize(
+			new SerializedMessageEnvelope
+			{
+				MessageId = 777,
+				From = 2001,
+				To = 1001,
+				CallType = CallType.Call,
+				PayloadContractId = 555123456,
+				Payload = new byte[] { 1 },
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				Version = MessageEnvelopeSerializer.WireVersion
+			}), CancellationToken.None);
+
+		// node1 must answer with a fault response (same MessageId), which reaches node2 as a
+		// stale response because the fabricated MessageId has no pending call there.
+		await loggerFactory2.WaitForLogAsync("Dropped a stale response for message 777",
+			TimeSpan.FromSeconds(10));
+
+		// Now inject an unknown-contract *response* frame: node1 must drop it silently instead of
+		// answering with another fault — otherwise mismatched peers would loop forever.
+		await connection.SendFrameAsync(KcpFrameType.Envelope, MessagePackSerializer.Serialize(
+			new SerializedMessageEnvelope
+			{
+				MessageId = 888,
+				From = 1001,
+				To = 2001,
+				CallType = CallType.Call,
+				PayloadContractId = 555123457,
+				Payload = new byte[] { 1 },
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			}), CancellationToken.None);
+		await Task.Delay(TimeSpan.FromSeconds(2));
+		lock (loggerFactory2.LockObject)
+		{
+			loggerFactory2.Messages.Should().NotContain(
+				message => message.Contains("888", StringComparison.Ordinal),
+				"an unresolvable fault response must be dropped instead of triggering another fault");
+		}
+
+		// The session survived both injections: a real call still roundtrips.
+		(await remote.CallAsync<string>(new KcpEchoRequest("again"), TimeSpan.FromSeconds(10)))
+			.Should().Be("echo:again");
+	}
+
+	[Fact]
 	public async Task InboundSessions_ShouldEnforceLimitWithoutEvictingExistingSessions()
 	{
 		var (port1, port2) = (GetFreeUdpPort(), GetFreeUdpPort());
