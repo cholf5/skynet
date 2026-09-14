@@ -1,3 +1,4 @@
+// Copied from tests/Skynet.Core.Tests/TestLogging.cs — keep in sync.
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 

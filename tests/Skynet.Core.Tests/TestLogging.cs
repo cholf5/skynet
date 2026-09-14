@@ -1,3 +1,4 @@
+// Keep in sync with the copy at tests/Skynet.Transport.Kcp.Tests/TestLogging.cs.
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 
