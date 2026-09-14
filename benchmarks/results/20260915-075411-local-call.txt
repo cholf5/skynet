@@ -1,0 +1,12 @@
+scenario:     local-call
+duration:     5.001s
+concurrency:  1
+total ops:    2594987
+ops/sec:      518,868
+latency min:  0.067 ms
+latency p50:  0.158 ms
+latency p90:  0.246 ms
+latency p99:  0.625 ms
+latency max:  1749.879 ms
+
+JSON results written to benchmarks/results/20260915-075411-local-call.json
