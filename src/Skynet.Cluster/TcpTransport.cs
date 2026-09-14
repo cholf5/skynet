@@ -52,6 +52,14 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		_system = system ?? throw new ArgumentNullException(nameof(system));
 		_registry = registry ?? throw new ArgumentNullException(nameof(registry));
 		_options = options ?? new TcpTransportOptions();
+		if (_options.MaxFrameBytes <= 0)
+		{
+			// Non-positive values silently disabled the frame size guard; "no limit" must be an
+			// explicit int.MaxValue instead of an accidental default(T) or miscomputed constant.
+			throw new ArgumentOutOfRangeException(nameof(options), _options.MaxFrameBytes,
+				"MaxFrameBytes must be positive; pass int.MaxValue to disable the frame size limit.");
+		}
+
 		_logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<TcpTransport>();
 		_serializerOptions = _options.SerializerOptions ?? MessagePackSerializerOptions.Standard;
 		_deadNodeGracePeriod = ResolveDeadNodeGracePeriod(_options);
@@ -482,10 +490,11 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	/// <summary>
 	/// Handles an envelope whose payload contract id is not registered on this node. Request frames
 	/// that expect a response (<c>CallType.Call</c>) are answered with a <see cref="RemoteCallFault"/>
-	/// so the caller's pending call fails at RTT speed instead of hanging until the connection dies;
-	/// every other frame is silently dropped. Response frames are never answered: a fault we cannot
-	/// read must not trigger another fault, or two peers with mismatched contract sets would loop
-	/// forever on each other's fault responses.
+	/// so the caller's pending call fails at RTT speed instead of hanging until the connection dies.
+	/// Response frames carry this node's own message id, so the matching pending call is failed
+	/// locally — no reply is ever sent for an unreadable frame: a fault we cannot read must not
+	/// trigger another fault, or two peers with mismatched contract sets would loop forever on each
+	/// other's fault responses.
 	/// </summary>
 	internal async Task HandleUnknownPayloadContractAsync(TcpConnection connection, MessageEnvelope request,
 		int contractId)
@@ -494,10 +503,28 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			"Rejected envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
 			connection.RemoteNodeId, contractId);
 
-		if (request.IsResponse || request.CallType != CallType.Call)
+		if (request.IsResponse)
 		{
-			// Fire-and-forget requests leave no pending call on the peer to fail fast, and
-			// answering a response (possibly an unreadable fault) would create a fault loop.
+			// The pending call is local (response frames are matched against this node's own
+			// pending calls only), so it can be failed directly with zero loop-back risk. This
+			// converts a call that would otherwise hang until timeout/disconnect into an
+			// immediate failure with the same surface as a remote-answered fault.
+			if (_pendingCalls.TryRemove(request.MessageId, out var pending))
+			{
+				using (pending)
+				{
+					pending.Response.TrySetException(new RpcDispatchException(
+						$"Payload contract id {contractId} is not registered on this node; the response could not be decoded. " +
+						"Ensure all nodes share the same contract assembly and register the payload type."));
+				}
+			}
+
+			return;
+		}
+
+		if (request.CallType != CallType.Call)
+		{
+			// Fire-and-forget requests leave no pending call on the peer to fail fast.
 			return;
 		}
 
@@ -508,7 +535,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 				"Ensure all nodes share the same contract assembly and register the payload type.");
 		try
 		{
-			await connection.SendEnvelopeAsync(request.WithResponse(fault), CancellationToken.None)
+			await connection.SendEnvelopeAsync(request.WithResponse(fault), _cts.Token)
 				.ConfigureAwait(false);
 		}
 		catch (Exception exception)
@@ -618,8 +645,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		[property: Key(1)] string ExceptionType,
 		[property: Key(2)] string? Message);
 
-		internal sealed class TcpConnection : IAsyncDisposable
-		{
+	internal sealed class TcpConnection : IAsyncDisposable
+	{
 		private readonly TcpTransport _transport;
 		private readonly TcpClient _client;
 		private readonly NetworkStream _stream;
@@ -856,7 +883,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 				throw new InvalidOperationException("Negative frame length encountered.");
 			}
 
-			if (_maxFrameBytes > 0 && length > _maxFrameBytes)
+			if (length > _maxFrameBytes)
 			{
 				// Hard-reject oversized frames before allocating anything so a malicious peer
 				// cannot force huge allocations (OOM); the connection is torn down immediately.
@@ -952,7 +979,8 @@ public sealed class TcpTransportOptions
 	/// <summary>
 	/// Gets or sets the maximum allowed frame payload size in bytes. A frame that announces a
 	/// larger payload is rejected and the connection is closed to prevent malicious peers from
-	/// forcing huge allocations. The default is 16 MB.
+	/// forcing huge allocations. The default is 16 MB. Must be positive; pass
+	/// <see cref="int.MaxValue"/> to disable the frame size limit.
 	/// </summary>
 	public int MaxFrameBytes
 	{

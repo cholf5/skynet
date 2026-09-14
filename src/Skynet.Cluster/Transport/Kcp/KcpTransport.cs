@@ -63,13 +63,19 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	internal readonly ConcurrentDictionary<uint, KcpConnection> _sessionsByConv = new();
 	internal readonly ConcurrentDictionary<string, KcpConnection> _connections = new(StringComparer.Ordinal);
 	private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectionLocks = new(StringComparer.Ordinal);
-	private readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
+	/// <summary>
+	/// Pending remote calls keyed by message id. Internal for test introspection; do not mutate
+	/// outside of the pending-call lifecycle paths (mirrors TcpTransport._pendingCalls).
+	/// </summary>
+	internal readonly ConcurrentDictionary<long, PendingCall> _pendingCalls = new();
 	/// <summary>Retired conversation ids mapped to the raw tick count at which the entry expires.</summary>
 	private readonly ConcurrentDictionary<uint, long> _retiredConversations = new();
 	private int _inboundSessionCount;
 	private readonly MessagePackSerializerOptions _serializerOptions;
 	private Task? _receiveLoop;
-	private bool _disposed;
+	// 0 = live, 1 = disposed; guarded with Interlocked so concurrent dispose calls cannot both
+	// run the teardown sequence (same pattern as KcpConnection._disposed).
+	private int _disposed;
 
 	public KcpTransport(ActorSystem system, IClusterRegistry registry, KcpTransportOptions? options = null,
 		ILoggerFactory? loggerFactory = null)
@@ -77,6 +83,15 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		_system = system ?? throw new ArgumentNullException(nameof(system));
 		_registry = registry ?? throw new ArgumentNullException(nameof(registry));
 		_options = options ?? new KcpTransportOptions();
+		if (_options.MaxMessageBytes <= 0)
+		{
+			// Non-positive values would silently disable the message size guard; "no limit" must
+			// be an explicit int.MaxValue instead of an accidental default(T) (mirrors the
+			// TcpTransportOptions.MaxFrameBytes validation).
+			throw new ArgumentOutOfRangeException(nameof(options), _options.MaxMessageBytes,
+				"MaxMessageBytes must be positive; pass int.MaxValue to disable the message size limit.");
+		}
+
 		_logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<KcpTransport>();
 		_serializerOptions = _options.SerializerOptions ?? MessagePackSerializerOptions.Standard;
 		var localNodeId = registry.LocalNodeId ??
@@ -98,7 +113,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		CancellationToken cancellationToken = default)
 	{
 		cancellationToken.ThrowIfCancellationRequested();
-		if (_disposed)
+		if (_disposed != 0)
 		{
 			throw new ObjectDisposedException(nameof(KcpTransport));
 		}
@@ -206,7 +221,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	/// </summary>
 	internal void SendDatagram(IPEndPoint endpoint, ReadOnlyMemory<byte> datagram)
 	{
-		if (_disposed)
+		if (_disposed != 0)
 		{
 			return;
 		}
@@ -217,7 +232,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		}
 		catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
 		{
-			if (!_disposed)
+			if (_disposed == 0)
 			{
 				_logger.LogDebug(ex, "Failed to send a {Length}-byte UDP datagram to {EndPoint}.", datagram.Length,
 					endpoint);
@@ -234,13 +249,13 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 			{
 				result = await _udp.ReceiveAsync(cancellationToken).ConfigureAwait(false);
 			}
-			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || _disposed)
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || _disposed != 0)
 			{
 				break;
 			}
 			catch (SocketException ex)
 			{
-				if (_disposed)
+				if (_disposed != 0)
 				{
 					break;
 				}
@@ -248,7 +263,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 				_logger.LogWarning(ex, "UDP receive failed; continuing.");
 				continue;
 			}
-			catch (ObjectDisposedException) when (_disposed)
+			catch (ObjectDisposedException) when (_disposed != 0)
 			{
 				break;
 			}
@@ -295,8 +310,11 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	}
 
 	/// <summary>
-	/// Checks whether the conversation id belongs to a session that was already closed. Expired
-	/// entries are removed on access so the bookkeeping cannot grow without bound.
+	/// Checks whether the conversation id belongs to a session that was already closed. Entries are
+	/// removed lazily: only when another datagram probes the same conversation id after its
+	/// retention has expired is the stale entry deleted. Ids that never see traffic again stay in
+	/// the table — growth is bounded by session churn (one entry per closed conversation), not by
+	/// a background sweep.
 	/// </summary>
 	private bool IsRetiredConversation(uint conversationId)
 	{
@@ -510,7 +528,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		_retiredConversations[connection.ConversationId] =
 			Environment.TickCount64 + RetiredConversationRetention.Ticks;
 
-		if (_disposed || !connection.TryGetRemoteNodeId(out var nodeId))
+		if (_disposed != 0 || !connection.TryGetRemoteNodeId(out var nodeId))
 		{
 			return;
 		}
@@ -605,9 +623,10 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	/// Handles an envelope whose payload contract id is not registered on this node. Request frames
 	/// that expect a response (<c>CallType.Call</c>) are answered with a
 	/// <see cref="KcpRemoteCallFault"/> so the caller's pending call fails at RTT speed instead of
-	/// hanging until the session dies; every other frame is silently dropped. Response frames are
-	/// never answered: a fault we cannot read must not trigger another fault, or two peers with
-	/// mismatched contract sets would loop forever on each other's fault responses. Mirrors
+	/// hanging until the session dies. Response frames carry this node's own message id, so the
+	/// matching pending call is failed locally — no reply is ever sent for an unreadable frame: a
+	/// fault we cannot read must not trigger another fault, or two peers with mismatched contract
+	/// sets would loop forever on each other's fault responses. Mirrors
 	/// <see cref="TcpTransport.HandleUnknownPayloadContractAsync"/>.
 	/// </summary>
 	internal async Task HandleUnknownPayloadContractAsync(KcpConnection connection, MessageEnvelope request,
@@ -617,10 +636,28 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 			"Rejected KCP envelope from node {NodeId}: payload contract id {ContractId} is not registered on this node.",
 			connection.RemoteNodeId, contractId);
 
-		if (request.IsResponse || request.CallType != CallType.Call)
+		if (request.IsResponse)
 		{
-			// Fire-and-forget requests leave no pending call on the peer to fail fast, and
-			// answering a response (possibly an unreadable fault) would create a fault loop.
+			// The pending call is local (response frames are matched against this node's own
+			// pending calls only), so it can be failed directly with zero loop-back risk. This
+			// converts a call that would otherwise hang until timeout/disconnect into an
+			// immediate failure with the same surface as a remote-answered fault.
+			if (_pendingCalls.TryRemove(request.MessageId, out var pending))
+			{
+				using (pending)
+				{
+					pending.Response.TrySetException(new RpcDispatchException(
+						$"Payload contract id {contractId} is not registered on this node; the response could not be decoded. " +
+						"Ensure all nodes share the same contract assembly and register the payload type."));
+				}
+			}
+
+			return;
+		}
+
+		if (request.CallType != CallType.Call)
+		{
+			// Fire-and-forget requests leave no pending call on the peer to fail fast.
 			return;
 		}
 
@@ -631,7 +668,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 				"Ensure all nodes share the same contract assembly and register the payload type.");
 		try
 		{
-			await connection.SendEnvelopeAsync(request.WithResponse(fault), CancellationToken.None)
+			await connection.SendEnvelopeAsync(request.WithResponse(fault), _cts.Token)
 				.ConfigureAwait(false);
 		}
 		catch (Exception exception)
@@ -677,12 +714,13 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 	/// <inheritdoc />
 	public async ValueTask DisposeAsync()
 	{
-		if (_disposed)
+		// Atomic check-and-set: concurrent dispose calls (e.g. user code racing a receive-loop
+		// failure path) must let exactly one caller run the cancellation/teardown sequence.
+		if (Interlocked.Exchange(ref _disposed, 1) != 0)
 		{
 			return;
 		}
 
-		_disposed = true;
 		await _cts.CancelAsync().ConfigureAwait(false);
 		_udp.Close();
 		if (_receiveLoop is not null)
@@ -714,7 +752,7 @@ public sealed class KcpTransport : ITransport, IAsyncDisposable
 		_cts.Dispose();
 	}
 
-	private sealed class PendingCall : IDisposable
+	internal sealed class PendingCall : IDisposable
 	{
 		private readonly CancellationTokenRegistration _registration;
 
@@ -798,7 +836,8 @@ public sealed class KcpTransportOptions
 	/// <summary>
 	/// Gets or sets the maximum allowed frame payload size in bytes. KCP fragments large messages
 	/// internally, but a single message can span at most 255 fragments (~288 KB at the default
-	/// MTU), so frames beyond this limit are rejected up front. The default is 256 KB.
+	/// MTU), so frames beyond this limit are rejected up front. The default is 256 KB. Must be
+	/// positive; pass <see cref="int.MaxValue"/> to disable the message size limit.
 	/// </summary>
 	public int MaxMessageBytes { get; init; } = 256 * 1024;
 

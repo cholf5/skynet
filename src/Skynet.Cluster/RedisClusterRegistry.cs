@@ -23,6 +23,8 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 	private readonly ConcurrentDictionary<string, string> _eventSnapshot = new(StringComparer.Ordinal);
 	private readonly CancellationTokenSource _cts = new();
 	private readonly Lock _localServicesLock = new();
+	// 0 = idle, 1 = reconcile running, 2 = running + another restore arrived while running.
+	private int _reconcileState;
 	private readonly IDisposable _subscription;
 	private readonly Task _heartbeatTask;
 	private readonly string _nodeKey;
@@ -149,50 +151,58 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 		ThrowIfDisposed();
 
+		// Only the in-memory local registration is maintained under the lock; the Redis round
+		// trips below run outside it so a slow or unavailable Redis cannot stall the heartbeat's
+		// self-heal refresh, which takes the same lock per entry.
 		lock (_localServicesLock)
 		{
 			if (_localServices.TryGetValue(name, out var existing) && existing.Handle != handle)
 			{
 				throw new InvalidOperationException($"Service '{name}' is already registered locally with handle {existing.Handle.Value}.");
 			}
-
-			var location = new ClusterActorLocation(_options.NodeId, handle);
-			var encodedLocation = EncodeLocation(location);
-			var expiry = _options.RegistrationTtl;
-			var serviceKey = ServiceKey(name);
-
-			var claimed = _client.TryClaimKey(serviceKey, encodedLocation, expiry, out var currentOwner);
-			if (!claimed)
-			{
-				if (currentOwner is null)
-				{
-					claimed = _client.TryClaimKey(serviceKey, encodedLocation, expiry, out currentOwner);
-				}
-
-				if (!claimed && currentOwner is not null)
-				{
-					var remote = DecodeLocation(currentOwner);
-					if (!string.Equals(remote.NodeId, _options.NodeId, StringComparison.Ordinal) || remote.Handle.Value != handle.Value)
-					{
-						throw new InvalidOperationException($"Service '{name}' is already owned by node '{remote.NodeId}' with handle {remote.Handle.Value}.");
-					}
-
-					_client.KeyExpire(serviceKey, expiry);
-				}
-			}
-
-			var handleKey = HandleKey(handle.Value);
-			var handleClaimed = _client.TryClaimKey(handleKey, _options.NodeId, expiry, out var handleOwner);
-			if (!handleClaimed && handleOwner is not null && !string.Equals(handleOwner, _options.NodeId, StringComparison.Ordinal))
-			{
-				throw new InvalidOperationException($"Handle {handle.Value} is already associated with node '{handleOwner}'.");
-			}
-
-			_client.KeyExpire(handleKey, expiry);
-			_localServices[name] = new LocalRegistration(handle, encodedLocation);
-			CacheLocal(location, name);
-			_client.Publish(GetEventChannel(), $"service|{name}|{location.NodeId}|{handle.Value}");
 		}
+
+		var location = new ClusterActorLocation(_options.NodeId, handle);
+		var encodedLocation = EncodeLocation(location);
+		var expiry = _options.RegistrationTtl;
+		var serviceKey = ServiceKey(name);
+
+		var claimed = _client.TryClaimKey(serviceKey, encodedLocation, expiry, out var currentOwner);
+		if (!claimed)
+		{
+			if (currentOwner is null)
+			{
+				claimed = _client.TryClaimKey(serviceKey, encodedLocation, expiry, out currentOwner);
+			}
+
+			if (!claimed && currentOwner is not null)
+			{
+				var remote = DecodeLocation(currentOwner);
+				if (!string.Equals(remote.NodeId, _options.NodeId, StringComparison.Ordinal) || remote.Handle.Value != handle.Value)
+				{
+					throw new InvalidOperationException($"Service '{name}' is already owned by node '{remote.NodeId}' with handle {remote.Handle.Value}.");
+				}
+
+				_client.KeyExpire(serviceKey, expiry);
+			}
+		}
+
+		var handleKey = HandleKey(handle.Value);
+		var handleClaimed = _client.TryClaimKey(handleKey, _options.NodeId, expiry, out var handleOwner);
+		if (!handleClaimed && handleOwner is not null && !string.Equals(handleOwner, _options.NodeId, StringComparison.Ordinal))
+		{
+			throw new InvalidOperationException($"Handle {handle.Value} is already associated with node '{handleOwner}'.");
+		}
+
+		_client.KeyExpire(handleKey, expiry);
+
+		lock (_localServicesLock)
+		{
+			_localServices[name] = new LocalRegistration(handle, encodedLocation);
+		}
+
+		CacheLocal(location, name);
+		_client.Publish(GetEventChannel(), $"service|{name}|{location.NodeId}|{handle.Value}");
 	}
 
 	/// <inheritdoc />
@@ -377,9 +387,35 @@ public sealed class RedisClusterRegistry : IClusterRegistry, IAsyncDisposable
 
 	private void OnConnectionRestored()
 	{
-		// StackExchange.Redis raises this on its socket worker thread; Redis I/O must never run there,
-		// so reconciliation is pushed to the thread pool. Exceptions are contained inside the worker.
-		Task.Run(ReconcileSubscription);
+		// StackExchange.Redis raises this on its socket worker thread — and once per connection
+		// (interactive and subscription), so two triggers can race. Redis I/O must never run on the
+		// socket worker, and two concurrent reconciliations would replay the diff twice. The
+		// running/pending state machine lets exactly one reconciliation run at a time while a
+		// trigger arriving mid-pass is never lost: it schedules one follow-up pass that re-reads
+		// the authoritative state after both connections were restored.
+		if (Interlocked.CompareExchange(ref _reconcileState, 1, 0) != 0)
+		{
+			// A pass is already running (or pending); mark it pending and return.
+			Interlocked.CompareExchange(ref _reconcileState, 2, 1);
+			return;
+		}
+
+		Task.Run(ReconcileWorker);
+	}
+
+	private void ReconcileWorker()
+	{
+		while (true)
+		{
+			ReconcileSubscription();
+			// Consume a trailing pending marker so a restore signal that arrived mid-pass is not lost.
+			if (Interlocked.CompareExchange(ref _reconcileState, 0, 1) == 1)
+			{
+				return;
+			}
+
+			Interlocked.CompareExchange(ref _reconcileState, 1, 2);
+		}
 	}
 
 	/// <summary>

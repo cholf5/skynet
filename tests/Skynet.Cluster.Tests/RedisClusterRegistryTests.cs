@@ -174,6 +174,48 @@ public sealed class RedisClusterRegistryTests
 		byHandle.NodeId.Should().Be(optionsA.NodeId);
 	}
 
+	[Fact]
+	public async Task ConcurrentReconnectTriggersShouldReplayDiffExactlyOnce()
+	{
+		// SE.Redis raises ConnectionRestored once per connection (interactive + subscription), so
+		// two triggers can race. Two concurrent reconciliations must not replay the same diff
+		// twice: one pass runs, and a trigger arriving mid-pass schedules a follow-up that finds
+		// the diff already consumed (0 added / 0 removed).
+		var server = new FakeRedisServer();
+		var optionsA = CreateOptions("node-a", 5000);
+		var optionsB = CreateOptions("node-b", 6000);
+		var loggerB = new CapturingLogger();
+		var clientB = server.CreateClient();
+
+		await using var registryA = new RedisClusterRegistry(optionsA, server.CreateClient(), NullLoggerFactory.Instance);
+		await using var registryB = new RedisClusterRegistry(optionsB, clientB, loggerB);
+
+		var handle = new ActorHandle(555);
+		registryA.RegisterLocalActor("reconcile-svc", handle);
+		registryB.TryResolveByName("reconcile-svc", out _).Should().BeTrue();
+
+		clientB.SimulateConnectionFailure();
+		registryA.RegisterLocalActor("mid-outage-svc", new ActorHandle(556));
+
+		// Two concurrent restore triggers, mirroring the interactive + subscription connections.
+		var first = Task.Run(clientB.SimulateReconnect);
+		var second = Task.Run(clientB.SimulateReconnect);
+		await Task.WhenAll(first, second);
+
+		// The diff must be replayed exactly once (1 added, 0 removed).
+		await TestWait.UntilAsync(() => loggerB.Snapshot.Any(entry =>
+			entry.Message.Contains("replayed 1 added, 0 removed, 1 suppressed.", StringComparison.Ordinal)));
+
+		// Give any scheduled follow-up pass time to run, then verify no duplicate replay happened
+		// and the reconciled state is visible to subscribers.
+		await Task.Delay(200);
+		loggerB.Snapshot.Count(entry =>
+			entry.Message.Contains("replayed 1 added, 0 removed, 1 suppressed.", StringComparison.Ordinal))
+			.Should().Be(1, "the reconciliation diff must be replayed exactly once");
+		registryB.TryResolveByName("mid-outage-svc", out var midOutage).Should().BeTrue();
+		midOutage.Handle.Value.Should().Be(556);
+	}
+
 	private static RedisClusterRegistryOptions CreateOptions(string nodeId, int port)
 	{
 		return new RedisClusterRegistryOptions

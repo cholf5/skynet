@@ -523,6 +523,117 @@ result.Should().Be("echo:pong");
 	}
 
 	[Fact]
+	public void Constructor_ShouldRejectNonPositiveMaxFrameBytes()
+	{
+		// MaxFrameBytes = 0 used to silently disable the frame size guard; "no limit" must be an
+		// explicit int.MaxValue so the guard can never be lost to an accidental default value.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		Action act = () => _ = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				MaxFrameBytes = 0
+			}, NullLoggerFactory.Instance));
+		act.Should().Throw<ArgumentOutOfRangeException>()
+			.And.ActualValue.Should().Be(0);
+	}
+
+	[Fact]
+	public async Task Constructor_ShouldAcceptExplicitIntMaxValueFrameSize()
+	{
+		// Disabling the frame size guard is a deliberate opt-in: int.MaxValue must be accepted.
+		var port = GetFreePort();
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[] { CreateNodeConfiguration("node1", port, 1000) }
+		};
+		var registry = new StaticClusterRegistry(configuration, "node1");
+		TcpTransport? transport = null;
+		await using var system = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry },
+			transportFactory: sys => transport = new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				MaxFrameBytes = int.MaxValue,
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+		transport!._pendingCalls.Should().BeEmpty("the transport must be constructed with the guard disabled");
+	}
+
+	[Fact]
+	public async Task CallAsync_ShouldFailFastWhenResponseContractIdUnknown()
+	{
+		// Node1 calls a handle on node2, where node2 is a raw socket peer that answers with a
+		// response whose payload contract id node1 does not know. Node1 holds the pending call's
+		// message id, so it must fail the pending call locally (RpcDispatchException) instead of
+		// dropping the frame and leaving the caller to the call timeout.
+		var (port1, port2) = (GetFreePort(), GetFreePort());
+		var configuration = new StaticClusterConfiguration
+		{
+			Nodes = new[]
+			{
+				CreateNodeConfiguration("node1", port1, 1000),
+				CreateNodeConfiguration("node2", port2, 2000, ("ghost", 2001))
+			}
+		};
+		var registry1 = new StaticClusterRegistry(configuration, "node1");
+
+		TcpTransport? transport1 = null;
+		await using var system1 = new ActorSystem(
+			options: new ActorSystemOptions { ClusterRegistry = registry1 },
+			transportFactory: sys => transport1 = new TcpTransport(sys, registry1, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(60)
+			}, NullLoggerFactory.Instance));
+
+		using var listener = new TcpListener(IPAddress.Loopback, port2);
+		listener.Start();
+
+		// Raw node2: complete the handshake and answer the call with an unresolvable response.
+		var peerTask = Task.Run(async () =>
+		{
+			var server = await listener.AcceptTcpClientAsync();
+			var stream = server.GetStream();
+			var (handshakeType, _) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+			handshakeType.Should().Be(0x01);
+			await WriteFrameAsync(stream, 0x01,
+				MessagePackSerializer.Serialize(new TcpTransport.ClusterHandshake("raw-node2")));
+
+			var (callType, callPayload) = await ReadFrameAsync(stream, TimeSpan.FromSeconds(10));
+			callType.Should().Be(0x02);
+			var call = MessagePackSerializer.Deserialize<SerializedMessageEnvelope>(callPayload);
+			await WriteFrameAsync(stream, 0x02, MessagePackSerializer.Serialize(new SerializedMessageEnvelope
+			{
+				MessageId = call.MessageId,
+				From = call.To,
+				To = call.From,
+				CallType = CallType.Call,
+				PayloadContractId = 555123458,
+				Payload = new byte[] { 1 },
+				TraceId = null,
+				Timestamp = DateTimeOffset.UtcNow.UtcTicks,
+				TimeToLiveTicks = null,
+				Version = MessageEnvelopeSerializer.WireVersion,
+				IsResponse = true
+			}));
+		});
+
+		var unknownResponseCall = system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("ping"),
+			TimeSpan.FromSeconds(30));
+		Func<Task> act = async () => await unknownResponseCall;
+		(await act.Should().ThrowAsync<RpcDispatchException>().WaitAsync(TimeSpan.FromSeconds(5)))
+			.Which.Message.Should().Contain("555123458",
+				"the local fast-fail must name the unresolvable contract id");
+		transport1!._pendingCalls.Should().BeEmpty("the local fast-fail must drain the pending call");
+
+		await peerTask;
+	}
+
+	[Fact]
 	public async Task TcpTransport_ShouldNotReplyWithFaultToUnresolvableFaultResponse()
 	{
 		// Fault-loop guard: a response frame whose payload contract id cannot be resolved (e.g. a
@@ -971,10 +1082,11 @@ result.Should().Be("echo:pong");
 			transportFactory: sys => new KcpTransport(sys, registry1, CreateKcpTestOptions(), loggerFactory));
 
 		var registry2 = new StaticClusterRegistry(configuration, "node2");
+		var loggerFactory2 = new RecordingLoggerFactory();
 		await using var system2 = new ActorSystem(
 			options: new ActorSystemOptions { ClusterRegistry = registry2 },
 			transportFactory: sys => new KcpTransport(sys, registry2, CreateKcpTestOptions(),
-				NullLoggerFactory.Instance));
+				loggerFactory2));
 		await system2.CreateActorAsync(() => new DelayEchoActor(), "delayEcho",
 			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
 
@@ -986,10 +1098,19 @@ result.Should().Be("echo:pong");
 		// The remote actor keeps processing; its response arrives ~500ms in, after the pending
 		// call was already removed by the cancellation above.
 		await loggerFactory.WaitForLogAsync("Dropped a stale response", TimeSpan.FromSeconds(5));
+
+		// Regression guard: if the stale response were dispatched to a local actor instead of
+		// dropped, the failed delivery would complete a response source, and the resulting fault
+		// would be sent back to node2 — which node2 would log as another stale response. (The
+		// previous assertion on "Failed to deliver message" was vacuous: the bogus-delivery path
+		// has a response source and can never reach that log line.)
 		await Task.Delay(300);
-		loggerFactory.Messages.Should().NotContain(
-			message => message.Contains("Failed to deliver message", StringComparison.Ordinal),
-			"the stale response must be dropped instead of being dispatched to a local actor");
+		lock (loggerFactory2.LockObject)
+		{
+			loggerFactory2.Messages.Should().NotContain(
+				message => message.Contains("Dropped a stale response", StringComparison.Ordinal),
+				"the stale response must be dropped instead of triggering a reverse fault to node2");
+		}
 	}
 
 	private static KcpTransportOptions CreateKcpTestOptions()
@@ -1030,7 +1151,7 @@ result.Should().Be("echo:pong");
 		var client = new TcpClient();
 		await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
 		var connection = new TcpTransport.TcpConnection(transport, client, outbound: true,
-			NullLogger.Instance, TimeSpan.Zero, TimeSpan.Zero, 0, MessagePackSerializerOptions.Standard);
+			NullLogger.Instance, TimeSpan.Zero, TimeSpan.Zero, int.MaxValue, MessagePackSerializerOptions.Standard);
 		var handshake = connection.InitializeAsync("node1", CancellationToken.None);
 
 		var server = await listener.AcceptTcpClientAsync();
