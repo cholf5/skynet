@@ -42,6 +42,13 @@ internal sealed class ActorHost : IAsyncDisposable
 
 	internal Task Startup => _startup.Task;
 
+	/// <summary>
+	/// Completes when the actor's message loop has fully shut down (normally, on error, or after
+	/// cancellation). Additive lifecycle seam used by optional hooks (e.g. snapshot capture) to
+	/// avoid awaiting a mailbox callback that will never run because the actor was stopped first.
+	/// </summary>
+	internal Task Stopped => _stopped.Task;
+
 	public ValueTask EnqueueAsync(MailboxMessage message, CancellationToken cancellationToken)
 	{
 		_metrics.OnMessageEnqueued(Handle);
