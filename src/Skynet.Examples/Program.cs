@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.Net;
 using System.Text;
 using MessagePack;
 using Microsoft.Extensions.Logging.Abstractions;
 using Skynet.Cluster;
 using Skynet.Core;
+using Skynet.Core.Serialization;
 using Skynet.Extras;
 using Skynet.Net;
 
@@ -77,31 +79,13 @@ public static class Program
 
 	private static async Task RunClusterSampleAsync(string nodeId)
 	{
-		var configuration = new StaticClusterConfiguration
-		{
-			Nodes =
-			[
-				new StaticClusterNodeConfiguration
-				{
-					NodeId = "node1",
-					Host = "127.0.0.1",
-					Port = 9101,
-					HandleOffset = 1000,
-					Services = new Dictionary<string, long>(StringComparer.Ordinal)
-					{
-						["echo"] = 1001
-					}
-				},
-				new StaticClusterNodeConfiguration
-				{
-					NodeId = "node2",
-					Host = "127.0.0.1",
-					Port = 9102,
-					HandleOffset = 2000
-				}
-			]
-		};
+		// The sample exchanges payload types that have no generated [SkynetActor] contract behind
+		// them. Senders self-register on first send, but receivers never invent types, so both
+		// nodes must pre-register the contract ids before the first remote call can be decoded.
+		PayloadContractRegistry.Register<EchoRequest>();
+		PayloadContractRegistry.Register<EchoNotice>();
 
+		var configuration = ApplyHostOverrides(BuildClusterConfiguration(includeGateNode: false));
 		var registry = new StaticClusterRegistry(configuration, nodeId);
 		var options = new ActorSystemOptions { ClusterRegistry = registry };
 		await using var system = new ActorSystem(
@@ -117,14 +101,35 @@ public static class Program
 			{
 				HandleOverride = new ActorHandle(1001)
 			}).Caf();
-			Console.WriteLine("Node1 listening on 127.0.0.1:9101. Press ENTER to exit.");
-			Console.ReadLine();
+			var host = configuration.Nodes.First(node =>
+				string.Equals(node.NodeId, "node1", StringComparison.Ordinal)).Host;
+			Console.WriteLine($"Node1 listening on {host}:9101. Press ENTER to exit.");
+			await WaitForStopAsync().Caf();
 			return;
 		}
 
 		var remote = system.GetByName("echo");
 		Console.WriteLine(
 			"Node2 connected to node1 via TCP. Type messages to call the remote echo actor. Empty line exits.");
+		if (Console.IsInputRedirected)
+		{
+			// Non-interactive mode (detached containers): stdin is already at EOF, so probe the
+			// remote echo actor periodically to keep the cross-node round trip visible in logs.
+			while (true)
+			{
+				await Task.Delay(TimeSpan.FromSeconds(10)).Caf();
+				try
+				{
+					var reply = await remote.CallAsync<string>(new EchoRequest("probe"), TimeSpan.FromSeconds(5)).Caf();
+					Console.WriteLine($"[remote] {reply}");
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"[remote] probe failed: {ex.Message}");
+				}
+			}
+		}
+
 		while (true)
 		{
 			Console.Write("> ");
@@ -137,6 +142,90 @@ public static class Program
 			var reply = await remote.CallAsync<string>(new EchoRequest(line), TimeSpan.FromSeconds(5)).Caf();
 			Console.WriteLine($"[remote] {reply}");
 		}
+	}
+
+	private static StaticClusterConfiguration BuildClusterConfiguration(bool includeGateNode)
+	{
+		var nodes = new List<StaticClusterNodeConfiguration>
+		{
+			new()
+			{
+				NodeId = "node1",
+				Host = "127.0.0.1",
+				Port = 9101,
+				HandleOffset = 1000,
+				Services = new Dictionary<string, long>(StringComparer.Ordinal)
+				{
+					["echo"] = 1001
+				}
+			},
+			new()
+			{
+				NodeId = "node2",
+				Host = "127.0.0.1",
+				Port = 9102,
+				HandleOffset = 2000
+			}
+		};
+
+		if (includeGateNode)
+		{
+			nodes.Add(new StaticClusterNodeConfiguration
+			{
+				NodeId = "gate",
+				Host = "127.0.0.1",
+				Port = 9103,
+				HandleOffset = 3000
+			});
+		}
+
+		return new StaticClusterConfiguration { Nodes = nodes };
+	}
+
+	/// <summary>
+	/// Overrides static registry hosts from the environment. For every configured node the
+	/// variable <c>SKYNET_NODE_{ID}_HOST</c> (node id upper-cased, '-' replaced by '_') replaces
+	/// the default 127.0.0.1 host; container deployments set it to the Docker service name so
+	/// peers discover each other across containers.
+	/// </summary>
+	private static StaticClusterConfiguration ApplyHostOverrides(StaticClusterConfiguration configuration)
+	{
+		var nodes = new List<StaticClusterNodeConfiguration>();
+		foreach (var node in configuration.Nodes)
+		{
+			var variable = $"SKYNET_NODE_{node.NodeId.ToUpperInvariant().Replace('-', '_')}_HOST";
+			var host = Environment.GetEnvironmentVariable(variable);
+			if (string.IsNullOrWhiteSpace(host))
+			{
+				nodes.Add(node);
+				continue;
+			}
+
+			Console.WriteLine($"Cluster host override: {node.NodeId} => {host.Trim()} ({variable}).");
+			nodes.Add(new StaticClusterNodeConfiguration
+			{
+				NodeId = node.NodeId,
+				Host = host.Trim(),
+				Port = node.Port,
+				HandleOffset = node.HandleOffset,
+				Services = node.Services
+			});
+		}
+
+		return new StaticClusterConfiguration { Nodes = nodes };
+	}
+
+	private static async Task WaitForStopAsync()
+	{
+		if (Console.IsInputRedirected)
+		{
+			// Detached containers (docker compose up -d) get an EOF'd stdin; Console.ReadLine would
+			// return immediately and stop the sample, so block until the runtime is stopped instead.
+			await Task.Delay(Timeout.InfiniteTimeSpan).Caf();
+			return;
+		}
+
+		Console.ReadLine();
 	}
 
 
@@ -165,27 +254,106 @@ public static class Program
 	private static async Task RunRoomSampleAsync()
 	{
 		Console.WriteLine("Starting gate server with room management...");
-		await using var system = new ActorSystem();
+		var clusterNodeId = Environment.GetEnvironmentVariable("SKYNET_CLUSTER_NODE_ID");
+		await using var system = CreateGateActorSystem(clusterNodeId);
 		var manager = new RoomManager(system);
 		var options = new GateServerOptions
 		{
-			TcpPort = 4010,
-			WebSocketPort = 4011,
+			TcpPort = ReadPortEnvironment("SKYNET_GATE_TCP_PORT", 4010),
+			WebSocketPort = ReadPortEnvironment("SKYNET_GATE_WS_PORT", 4011),
 			RouterFactory = context => new RoomSessionRouter(manager)
 		};
+
+		if (IsTruthyEnvironment("SKYNET_GATE_BIND_ALL"))
+		{
+			// Container deployments must bind every interface instead of loopback; HttpListener
+			// uses '+' as the wildcard host and PublicWebSocketHost keeps the printed endpoint
+			// host-friendly for clients.
+			options.TcpAddress = IPAddress.Any;
+			options.WebSocketHost = "+";
+			options.PublicWebSocketHost = "localhost";
+		}
 
 		await using var gate = new GateServer(system, options, NullLogger<GateServer>.Instance);
 		await gate.StartAsync().Caf();
 
 		Console.WriteLine($"TCP clients: connect to {gate.TcpEndpoint}");
 		Console.WriteLine($"WebSocket clients: connect to {gate.WebSocketEndpoint}");
+		if (!string.IsNullOrWhiteSpace(clusterNodeId))
+		{
+			Console.WriteLine($"Gate joined the sample cluster as node '{clusterNodeId}'.");
+			await WarmUpClusterLinkAsync(system).Caf();
+		}
+
 		Console.WriteLine(
 			"Commands: join <room>, leave <room>, say <room> <message>, rooms, who <room>, nick <alias>.");
 		Console.WriteLine("Press ENTER to stop the gate server.");
-		Console.ReadLine();
+		await WaitForStopAsync().Caf();
 
 		Console.WriteLine("Stopping gate server...");
 		await gate.StopAsync().Caf();
+	}
+
+	private static ActorSystem CreateGateActorSystem(string? clusterNodeId)
+	{
+		if (string.IsNullOrWhiteSpace(clusterNodeId))
+		{
+			return new ActorSystem();
+		}
+
+		// Joining the sample cluster turns the gate into a third static node, so the transport
+		// heartbeats to node1/node2 and cluster-wide actors remain resolvable from the gate.
+		var configuration = ApplyHostOverrides(BuildClusterConfiguration(includeGateNode: true));
+		var registry = new StaticClusterRegistry(configuration, clusterNodeId);
+		var options = new ActorSystemOptions { ClusterRegistry = registry };
+		return new ActorSystem(
+			options: options,
+			transportFactory: sys => new TcpTransport(sys, registry, new TcpTransportOptions
+			{
+				HeartbeatInterval = TimeSpan.FromSeconds(5)
+			}, NullLoggerFactory.Instance));
+	}
+
+	/// <summary>
+	/// Transport links are established lazily on first send, so a single warm-up call right after
+	/// startup makes the gate's cluster membership immediately visible in the logs of both sides
+	/// and keeps the heartbeat link to the echo node open.
+	/// </summary>
+	private static async Task WarmUpClusterLinkAsync(ActorSystem system)
+	{
+		try
+		{
+			var echo = system.GetByName("echo");
+			var reply = await echo.CallAsync<string>(new EchoRequest("gate-handshake"), TimeSpan.FromSeconds(5)).Caf();
+			Console.WriteLine($"Cluster warm-up: echo actor replied '{reply}'.");
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"Cluster warm-up failed (cluster peers may be offline): {ex.Message}");
+		}
+	}
+
+	private static int ReadPortEnvironment(string variable, int fallback)
+	{
+		var raw = Environment.GetEnvironmentVariable(variable);
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return fallback;
+		}
+
+		if (!int.TryParse(raw, out var port) || port is < 0 or > 65535)
+		{
+			throw new InvalidOperationException(
+				$"Environment variable {variable} must be a TCP port between 0 and 65535.");
+		}
+
+		return port;
+	}
+
+	private static bool IsTruthyEnvironment(string variable)
+	{
+		var raw = Environment.GetEnvironmentVariable(variable);
+		return raw is not null && (raw == "1" || string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase));
 	}
 
 	private static async Task RunRoomBenchmarkAsync()
@@ -243,9 +411,14 @@ public static class Program
 		}
 	}
 
-	private sealed record EchoNotice(string Message);
+	// Cross-node payloads must carry a MessagePack contract: MessagePack 3.x no longer emits
+	// dynamic formatters for unannotated types (FormatterNotRegisteredException). At least
+	// internal visibility is required by MsgPack012; AllowPrivate is recommended by MsgPack015.
+	[MessagePackObject(AllowPrivate = true)]
+	internal sealed record EchoNotice([property: Key(0)] string Message);
 
-	private sealed record EchoRequest(string Message);
+	[MessagePackObject(AllowPrivate = true)]
+	internal sealed record EchoRequest([property: Key(0)] string Message);
 
 	private sealed class RoomLoopbackActor : Actor
 	{

@@ -1,0 +1,30 @@
+# E-10 可选项：手动触发的镜像构建冒烟验证。
+# 只验证 Dockerfile 可构建、产物完整；不推送 registry，也不接入既有 build/test 流程。
+# 说明：仓库开发环境未安装 Docker，本工作流本身同样未经实机运行，需在 GitHub Actions 上首次触发后确认。
+name: Docker Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t skynet/examples:ci .
+
+      - name: Inspect image
+        run: docker image inspect skynet/examples:ci --format 'id={{.Id}} size={{.Size}}'
+
+      - name: Export image artifact
+        run: docker save skynet/examples:ci -o "${RUNNER_TEMP}/skynet-examples-image.tar"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skynet-examples-image
+          path: ${{ runner.temp }}/skynet-examples-image.tar
+          retention-days: 3
