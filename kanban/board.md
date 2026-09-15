@@ -1,16 +1,16 @@
 # Kanban Board
 
 ## Backlog
-- [ ] [E-10 Docker compose 与部署脚本完善](issues/E-10-docker-compose-deploy.md) — Owner: AI Agent — Complexity: S
-- [ ] [E-9 Consistent hashing placement 策略](issues/E-9-consistent-hash-placement.md) — Owner: AI Agent — Complexity: S
-- [ ] [E-8 Persistence hooks（snapshot/WAL 插件点 + 样例）](issues/E-8-persistence-hooks.md) — Owner: AI Agent — Complexity: M
-- [ ] [E-6 传输层故障注入与 Chaos 测试](issues/E-6-transport-fault-injection.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## To Do
 - _None_
 
 ## In Progress
-- _None_
+- [ ] [E-6 传输层故障注入与 Chaos 测试](issues/E-6-transport-fault-injection.md) — Owner: AI Agent — Complexity: M
+- [ ] [E-8 Persistence hooks（snapshot/WAL 插件点 + 样例）](issues/E-8-persistence-hooks.md) — Owner: AI Agent — Complexity: M
+- [ ] [E-9 Consistent hashing placement 策略](issues/E-9-consistent-hash-placement.md) — Owner: AI Agent — Complexity: S
+- [ ] [E-10 Docker compose 与部署脚本完善](issues/E-10-docker-compose-deploy.md) — Owner: AI Agent — Complexity: S
 
 ## In Review
 - _None_
