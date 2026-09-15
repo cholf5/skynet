@@ -310,41 +310,56 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		var client = new TcpClient();
 		var connectCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, cancellationToken);
-		if (_options.ConnectTimeout > TimeSpan.Zero)
-		{
-			connectCts.CancelAfter(_options.ConnectTimeout);
-		}
-
-		await client.ConnectAsync(descriptor.EndPoint.Address, descriptor.EndPoint.Port, connectCts.Token)
-			.ConfigureAwait(false);
-		// Client TLS settings are resolved per dial: the target host names the dialed endpoint so
-		// SNI and certificate name validation see the registry address.
-		SslClientAuthenticationOptions? tlsClientOptions = null;
-		if (_options.UseTls)
-		{
-			tlsClientOptions = new SslClientAuthenticationOptions
-			{
-				TargetHost = descriptor.EndPoint.Address.ToString(),
-				RemoteCertificateValidationCallback = _options.RemoteCertificateValidationCallback
-			};
-		}
-
-		var connection = new TcpConnection(this, client, outbound: true, _logger, _options.HeartbeatInterval,
-			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions, tlsClientOptions: tlsClientOptions,
-			streamDecorator: _options.StreamDecorator);
+		TcpConnection? connection = null;
 		try
 		{
+			if (_options.ConnectTimeout > TimeSpan.Zero)
+			{
+				connectCts.CancelAfter(_options.ConnectTimeout);
+			}
+
+			await client.ConnectAsync(descriptor.EndPoint.Address, descriptor.EndPoint.Port, connectCts.Token)
+				.ConfigureAwait(false);
+			// Client TLS settings are resolved per dial: the target host names the dialed endpoint so
+			// SNI and certificate name validation see the registry address.
+			SslClientAuthenticationOptions? tlsClientOptions = null;
+			if (_options.UseTls)
+			{
+				tlsClientOptions = new SslClientAuthenticationOptions
+				{
+					TargetHost = descriptor.EndPoint.Address.ToString(),
+					RemoteCertificateValidationCallback = _options.RemoteCertificateValidationCallback
+				};
+			}
+
+			connection = new TcpConnection(this, client, outbound: true, _logger, _options.HeartbeatInterval,
+				_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions, tlsClientOptions: tlsClientOptions,
+				streamDecorator: _options.StreamDecorator);
 			await connection.InitializeAsync(_registry.LocalNodeId!, connectCts.Token).ConfigureAwait(false);
+			return connection;
 		}
 		catch
 		{
-			// A failed TLS or cluster handshake must not leak the socket: dispose the connection
-			// (streams plus client) before surfacing the failure to the dialer.
-			await connection.DisposeAsync().ConfigureAwait(false);
+			// A refused dial or a failed TLS/cluster handshake must not leak resources: dispose the
+			// connection (streams plus client, idempotent) or the bare client when the connection
+			// was never constructed.
+			if (connection is not null)
+			{
+				await connection.DisposeAsync().ConfigureAwait(false);
+			}
+			else
+			{
+				client.Dispose();
+			}
+
 			throw;
 		}
-
-		return connection;
+		finally
+		{
+			// The token is only consumed by the dial and the handshake; both have concluded by the
+			// time we leave this scope, so the CTS (and its CancelAfter timer) can always go.
+			connectCts.Dispose();
+		}
 	}
 
 	private async Task AcceptLoopAsync(CancellationToken cancellationToken)
