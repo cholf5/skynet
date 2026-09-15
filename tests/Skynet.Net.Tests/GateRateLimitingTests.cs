@@ -147,8 +147,11 @@ public sealed class GateRateLimitingTests
 		{
 			TcpPort = 0,
 			EnableWebSockets = false,
-			// Two-token burst, one token every 500 ms: the third rapid frame is deterministically dropped.
-			RateLimiter = new TokenBucketGateRateLimiter(maxConnectionsPerIp: 8, inboundFramesPerSecond: 2, inboundFrameBurst: 2),
+			// Two-token burst, one token every 2 seconds: the third rapid frame is deterministically
+			// dropped. The 2 s window is deliberate — under heavy parallel test-host load a shorter
+			// window (e.g. 500 ms) could be crossed by scheduler starvation, letting frame "C" slip
+			// through and flaking the MessageCount assertion (F-3).
+			RateLimiter = new TokenBucketGateRateLimiter(maxConnectionsPerIp: 8, inboundFramesPerSecond: 0.5, inboundFrameBurst: 2),
 			RouterFactory = _ =>
 			{
 				var router = new CountingEchoRouter(echo.Handle);
@@ -179,8 +182,8 @@ public sealed class GateRateLimitingTests
 		await Task.Delay(100).ConfigureAwait(false);
 		router.MessageCount.Should().Be(2);
 
-		// The connection stays usable and the bucket refills (2 fps: a token is ready within ~500 ms).
-		await Task.Delay(700).ConfigureAwait(false);
+		// The connection stays usable and the bucket refills (0.5 fps: a token is ready within ~2 s).
+		await Task.Delay(2_200).ConfigureAwait(false);
 		await WriteFrameAsync(stream, "D").ConfigureAwait(false);
 		var late = await ReadFrameAsync(stream).ConfigureAwait(false);
 		late.Should().Be("D");
