@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using MessagePack;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -315,9 +317,32 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		await client.ConnectAsync(descriptor.EndPoint.Address, descriptor.EndPoint.Port, connectCts.Token)
 			.ConfigureAwait(false);
+		// Client TLS settings are resolved per dial: the target host names the dialed endpoint so
+		// SNI and certificate name validation see the registry address.
+		SslClientAuthenticationOptions? tlsClientOptions = null;
+		if (_options.UseTls)
+		{
+			tlsClientOptions = new SslClientAuthenticationOptions
+			{
+				TargetHost = descriptor.EndPoint.Address.ToString(),
+				RemoteCertificateValidationCallback = _options.RemoteCertificateValidationCallback
+			};
+		}
+
 		var connection = new TcpConnection(this, client, outbound: true, _logger, _options.HeartbeatInterval,
-			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions);
-		await connection.InitializeAsync(_registry.LocalNodeId!, connectCts.Token).ConfigureAwait(false);
+			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions, tlsClientOptions: tlsClientOptions);
+		try
+		{
+			await connection.InitializeAsync(_registry.LocalNodeId!, connectCts.Token).ConfigureAwait(false);
+		}
+		catch
+		{
+			// A failed TLS or cluster handshake must not leak the socket: dispose the connection
+			// (streams plus client) before surfacing the failure to the dialer.
+			await connection.DisposeAsync().ConfigureAwait(false);
+			throw;
+		}
+
 		return connection;
 	}
 
@@ -343,7 +368,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					{
 						var connection = new TcpConnection(this, client!, outbound: false, _logger,
 							_options.HeartbeatInterval, _deadNodeGracePeriod, _options.MaxFrameBytes,
-							_serializerOptions);
+							_serializerOptions, _options.TlsServerCertificate);
 						await connection.InitializeAsync(_registry.LocalNodeId!, _cts.Token).ConfigureAwait(false);
 						if (await TryRegisterInboundConnectionAsync(connection).ConfigureAwait(false))
 						{
@@ -637,7 +662,10 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 	{
 		private readonly TcpTransport _transport;
 		private readonly TcpClient _client;
-		private readonly NetworkStream _stream;
+		private readonly NetworkStream _networkStream;
+		private readonly X509Certificate2? _tlsServerCertificate;
+		private readonly SslClientAuthenticationOptions? _tlsClientOptions;
+		private Stream _stream;
 		private readonly bool _outbound;
 		private readonly ILogger _logger;
 		private readonly TimeSpan _heartbeatInterval;
@@ -654,7 +682,9 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		internal TcpConnection(TcpTransport transport, TcpClient client, bool outbound, ILogger logger,
 			TimeSpan heartbeatInterval, TimeSpan deadNodeGracePeriod, int maxFrameBytes,
-			MessagePackSerializerOptions serializerOptions)
+			MessagePackSerializerOptions serializerOptions,
+			X509Certificate2? tlsServerCertificate = null,
+			SslClientAuthenticationOptions? tlsClientOptions = null)
 		{
 			_transport = transport;
 			_client = client;
@@ -664,7 +694,10 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			_deadNodeGracePeriod = deadNodeGracePeriod;
 			_maxFrameBytes = maxFrameBytes;
 			_serializerOptions = serializerOptions;
-			_stream = client.GetStream();
+			_tlsServerCertificate = tlsServerCertificate;
+			_tlsClientOptions = tlsClientOptions;
+			_networkStream = client.GetStream();
+			_stream = _networkStream;
 		}
 
 		internal string RemoteNodeId =>
@@ -683,18 +716,79 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 		internal async Task InitializeAsync(string localNodeId, CancellationToken cancellationToken)
 		{
+			// TLS (when configured) must complete before any cluster frame is written or read so no
+			// plaintext handshake bytes can leak onto the wire and the peer's framing stays intact.
 			if (_outbound)
 			{
+				if (_tlsClientOptions is not null)
+				{
+					await AuthenticateTlsAsClientAsync(cancellationToken).ConfigureAwait(false);
+				}
+
 				await SendHandshakeAsync(localNodeId, cancellationToken).ConfigureAwait(false);
 				var handshake = await ReadHandshakeAsync(cancellationToken).ConfigureAwait(false);
 				_remoteNodeId = handshake.NodeId;
 			}
 			else
 			{
+				if (_tlsServerCertificate is not null)
+				{
+					await AuthenticateTlsAsServerAsync(cancellationToken).ConfigureAwait(false);
+				}
+
 				var handshake = await ReadHandshakeAsync(cancellationToken).ConfigureAwait(false);
 				_remoteNodeId = handshake.NodeId;
 				await SendHandshakeAsync(localNodeId, cancellationToken).ConfigureAwait(false);
 			}
+		}
+
+		/// <summary>
+		/// Wraps the raw socket stream in a client-side <see cref="SslStream"/> and completes the TLS
+		/// handshake against the remote node. Runs before the cluster handshake; a failed handshake
+		/// disposes the stream and rethrows so the whole connection is torn down.
+		/// </summary>
+		private async Task AuthenticateTlsAsClientAsync(CancellationToken cancellationToken)
+		{
+			var sslStream = new SslStream(_networkStream, leaveInnerStreamOpen: false);
+			try
+			{
+				await sslStream.AuthenticateAsClientAsync(_tlsClientOptions!, cancellationToken)
+					.ConfigureAwait(false);
+			}
+			catch (Exception exception)
+			{
+				await sslStream.DisposeAsync().ConfigureAwait(false);
+				_logger.LogWarning(exception, "TLS handshake as client failed before the cluster handshake.");
+				throw;
+			}
+
+			_stream = sslStream;
+		}
+
+		/// <summary>
+		/// Wraps the raw socket stream in a server-side <see cref="SslStream"/> and completes the TLS
+		/// handshake with the dialing node using the configured certificate. Runs before the cluster
+		/// handshake; a failed handshake disposes the stream and rethrows so the whole connection is
+		/// torn down.
+		/// </summary>
+		private async Task AuthenticateTlsAsServerAsync(CancellationToken cancellationToken)
+		{
+			var sslStream = new SslStream(_networkStream, leaveInnerStreamOpen: false);
+			try
+			{
+				await sslStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+				{
+					ServerCertificate = _tlsServerCertificate!
+				}, cancellationToken).ConfigureAwait(false);
+			}
+			catch (Exception exception)
+			{
+				await sslStream.DisposeAsync().ConfigureAwait(false);
+				_logger.LogWarning(exception, "TLS handshake as server failed before the cluster handshake.");
+				throw;
+			}
+
+			_stream = sslStream;
 		}
 
 		internal void Start(CancellationToken transportToken)
@@ -930,6 +1024,9 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			CancelConnection();
 			_writeLock.Dispose();
 			_cts.Dispose();
+			// Disposing the (possibly TLS-wrapped) stream first also closes the inner network
+			// stream; the client dispose below is then a harmless no-op for the socket.
+			_stream.Dispose();
 			_client.Dispose();
 		}
 
@@ -992,6 +1089,49 @@ public sealed class TcpTransportOptions
 	/// Gets or sets the serializer options applied to envelopes.
 	/// </summary>
 	public MessagePackSerializerOptions? SerializerOptions
+	{
+		get;
+		init;
+	}
+
+	/// <summary>
+	/// Gets or sets the certificate presented to dialing nodes on inbound (accepted) connections.
+	/// When set, every accepted connection is upgraded to TLS (<see cref="SslStream"/>) and must
+	/// complete the TLS handshake before the cluster handshake; when <see langword="null"/> (the
+	/// default) inbound connections stay plaintext. Nodes dialing this node must enable
+	/// <see cref="UseTls"/> — a dialer that does not will fail its connection (see
+	/// <see cref="UseTls"/> for the mismatch semantics).
+	/// </summary>
+	public X509Certificate2? TlsServerCertificate
+	{
+		get;
+		init;
+	}
+
+	/// <summary>
+	/// Gets or sets a value indicating whether outbound connections negotiate TLS
+	/// (<see cref="SslStream"/>) with the remote node before sending the cluster handshake. The
+	/// default is <see langword="false"/> (plaintext). The dialed node must serve TLS
+	/// (<see cref="TlsServerCertificate"/> set): a TLS client against a plaintext server — or a
+	/// plaintext client against a TLS server — never completes its handshake, so the connection
+	/// fails within <see cref="ConnectTimeout"/> (the TLS handshake is part of the bounded connect
+	/// sequence) instead of hanging.
+	/// </summary>
+	public bool UseTls
+	{
+		get;
+		init;
+	}
+
+	/// <summary>
+	/// Gets or sets the callback used to validate the remote node's certificate during the outbound
+	/// TLS handshake. Return <see langword="true"/> to accept the certificate and
+	/// <see langword="false"/> to reject it, which fails the connection. When
+	/// <see langword="null"/> (the default), the platform's standard chain and name validation
+	/// applies. Only effective when <see cref="UseTls"/> is <see langword="true"/>; inbound TLS
+	/// never invokes this callback (client certificates are not requested).
+	/// </summary>
+	public RemoteCertificateValidationCallback? RemoteCertificateValidationCallback
 	{
 		get;
 		init;
