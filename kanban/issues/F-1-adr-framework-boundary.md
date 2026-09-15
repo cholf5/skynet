@@ -1,7 +1,7 @@
 # F-1 ADR-0002 框架边界与生态引用策略（含 Extras 身份标注）
 
 ## 状态
-- 列：In Progress
+- 列：Done
 - Owner: AI Agent（PM 执行）
 - 复杂度：S
 - 依赖：E 系列全部完成
