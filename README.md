@@ -69,6 +69,9 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - [Redis 注册中心说明](docs/redis-registry.md)
 - [调试控制台说明](docs/debug-console.md)
 - [房间系统指南](docs/rooms.md)
+- [Gate 限流指南](docs/gate-rate-limiting.md)
+- [Prometheus 指标导出](docs/prometheus-metrics.md)
+- [基准测试与基线报告](docs/benchmarks.md)
 
 ## 核心能力
 
