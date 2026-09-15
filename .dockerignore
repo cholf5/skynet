@@ -1,0 +1,24 @@
+# 保持精简：Skynet.sln 的 restore 需要 tests/ 与 benchmarks/ 的 csproj，
+# Dockerfile 也会 COPY docs/，因此这些目录不能排除。
+# 版本控制 / CI
+.git/
+.github/
+.gitignore
+.gitattributes
+.git-blame-ignore-revs
+
+# IDE / 编辑器
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 构建产物
+**/bin/
+**/obj/
+artifacts/
+
+# 仓库本地内容（镜像构建不使用）
+kanban/
+scripts/

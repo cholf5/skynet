@@ -1,0 +1,89 @@
+# Skynet 三容器示例拓扑：node1 + node2 组成静态注册表集群，gate 作为第三个节点加入集群
+# 并对外暴露 TCP(2112) / WebSocket(8080) 接入点。
+#
+# 前置条件：Compose v2（`docker compose version`）。
+# 启动：docker compose -f docker-compose.yml up --build -d
+# 验证：见 docs/release-guide.md "Docker Compose 部署" 章节。
+#
+# 说明：Dockerfile 的 ENTRYPOINT 固定为 "--gate"，因此 cluster 节点必须整体覆盖
+# entrypoint；gate 服务沿用镜像默认入口，不再重复声明 command。
+name: skynet-demo
+
+x-examples-image: &examples-image
+  image: skynet/examples:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  networks:
+    - skynet
+
+services:
+  node1:
+    <<: *examples-image
+    entrypoint: ["dotnet", "Skynet.Examples.dll", "--cluster", "node1"]
+    environment:
+      # 静态注册表默认 host 为 127.0.0.1，容器间互 discover 必须改写为 compose 服务名。
+      SKYNET_NODE_NODE1_HOST: node1
+      SKYNET_NODE_NODE2_HOST: node2
+    ports:
+      # 集群传输端口仅发布到宿主机回环，供 telnet/nc 探活与排障；不需要可删除。
+      - "127.0.0.1:9101:9101"
+    healthcheck:
+      # runtime 镜像不含 curl，用 bash 内建 /dev/tcp 探测端口。
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9101'"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  node2:
+    <<: *examples-image
+    entrypoint: ["dotnet", "Skynet.Examples.dll", "--cluster", "node2"]
+    environment:
+      SKYNET_NODE_NODE1_HOST: node1
+      SKYNET_NODE_NODE2_HOST: node2
+    ports:
+      - "127.0.0.1:9102:9102"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9102'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  gate:
+    <<: *examples-image
+    environment:
+      SKYNET_GATE_TCP_PORT: "2112"
+      SKYNET_GATE_WS_PORT: "8080"
+      SKYNET_GATE_BIND_ALL: "true"
+      # 设置后 gate 以静态注册表第三个节点（9103）的身份加入集群并维持心跳。
+      SKYNET_CLUSTER_NODE_ID: gate
+      SKYNET_NODE_NODE1_HOST: node1
+      SKYNET_NODE_NODE2_HOST: node2
+      SKYNET_NODE_GATE_HOST: gate
+    ports:
+      - "2112:2112"
+      - "8080:8080"
+    depends_on:
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+    healthcheck:
+      # 2112 探测 TCP 监听；8080 发送真实 HTTP 请求，gate 对非 WebSocket 请求返回 400。
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/2112' && bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /ws/ HTTP/1.0\\r\\n\\r\\n\" >&3 && head -n1 <&3 | grep -q \"400\"'",
+        ]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+networks:
+  skynet:
+    name: skynet-demo-net
+    driver: bridge
