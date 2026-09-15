@@ -69,5 +69,8 @@
 - 所有等待均有界（`WaitAsync`/`WaitForLogAsync`/xUnit 超时），端口动态分配，无 sleep 时序假设；新增测试连续 5 次运行全绿。
 - 明文回归由既有 216 个测试全绿证明（`TcpTransportTests` 全部用例均未配置 TLS，行为与 main 一致）。
 
+### Review 修复
+- 2026-09-15（R1，PM review 提出）：`AcceptLoopAsync` 入站处理中 `InitializeAsync` 抛异常时 catch 只做了 `client?.Dispose()`，`TcpConnection` 持有的 `_cts`、`_writeLock` 等一次性资源泄漏——每个 TLS 握手失败/被拒的入站连接漏一次。修复：`connection` 提升到 try 外声明，catch 中非空时 `await connection.DisposeAsync()`（与出站 `ConnectAsync` 失败路径同一套释放逻辑，DisposeCore 幂等且已包含 `_stream`（含 SslStream）与 `_client`，未写第二份释放代码），构造器自身失败（connection 尚未创建）时保留 `client?.Dispose()` 兜底；warning 日志保留。该路径由既有测试 2（明文客户端↔TLS 服务端）与测试 3（客户端拒证书，断言 "Failed to process incoming connection" 日志）覆盖。修复后全量 220/220 通过，新增 TLS 测试 3 次复跑全绿。
+
 ### Review/QA
 （待填）

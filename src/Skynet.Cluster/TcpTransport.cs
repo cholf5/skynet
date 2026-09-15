@@ -364,9 +364,10 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 
 				_ = Task.Run(async () =>
 				{
+					TcpConnection? connection = null;
 					try
 					{
-						var connection = new TcpConnection(this, client!, outbound: false, _logger,
+						connection = new TcpConnection(this, client!, outbound: false, _logger,
 							_options.HeartbeatInterval, _deadNodeGracePeriod, _options.MaxFrameBytes,
 							_serializerOptions, _options.TlsServerCertificate);
 						await connection.InitializeAsync(_registry.LocalNodeId!, _cts.Token).ConfigureAwait(false);
@@ -385,7 +386,19 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					catch (Exception ex)
 					{
 						_logger.LogWarning(ex, "Failed to process incoming connection.");
-						client?.Dispose();
+						if (connection is not null)
+						{
+							// Same disposal contract as the outbound path in ConnectAsync: disposing the
+							// connection releases the streams (SslStream included) and the client, plus
+							// the connection's one-shot resources (_cts, _writeLock). DisposeCore is
+							// idempotent, so this is safe even after a partial teardown.
+							await connection.DisposeAsync().ConfigureAwait(false);
+						}
+						else
+						{
+							// The constructor itself failed before a connection existed.
+							client?.Dispose();
+						}
 					}
 				}, cancellationToken);
 			}
