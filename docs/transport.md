@@ -19,6 +19,70 @@ needs KCP/UDP connectivity. Both `TcpTransport` and `KcpTransport` implement the
 short-circuit, cluster-registry routing, pending-call tracking for `CallAsync`, fault envelopes, and
 heartbeat-based dead-peer detection. They are interchangeable from an `ActorSystem` perspective.
 
+## TcpTransport
+
+`TcpTransport` runs one TCP connection per remote node with a small custom framing protocol on top
+(`[type:1][length:4 big-endian][payload]`, frame types `Handshake = 1`, `Envelope = 2`,
+`Heartbeat = 3`). Connections are dialed lazily on the first send, arbitrated per node (outbound and
+inbound races resolved through one gate), re-established automatically after a disconnect, and kept
+alive with heartbeats plus `DeadNodeGracePeriod` dead-peer detection.
+
+### TLS (optional)
+
+Cross-node TCP links can be encrypted with TLS (`SslStream`). TLS is **off by default**: with no TLS
+option set the transport behaves exactly like the plaintext implementation — no extra handshake, no
+framing change, no measurable overhead.
+
+Configuration lives on `TcpTransportOptions` and is per connection direction:
+
+| Option | Side | Effect |
+|---|---|---|
+| `TlsServerCertificate` (`X509Certificate2?`) | server (inbound) | When set, every accepted connection is upgraded to TLS and must complete the server-side handshake with this certificate before the cluster handshake. `null` (default) keeps inbound connections plaintext. |
+| `UseTls` (`bool`) | client (outbound) | When `true`, every dialed connection completes a client-side TLS handshake before sending the cluster handshake. Default `false` (plaintext). |
+| `RemoteCertificateValidationCallback` | client (outbound) | Validates the server certificate during the outbound handshake. Return `true` to accept, `false` to reject (which fails the connection). `null` uses the platform default chain + name validation. Only used for outbound TLS; client certificates are not requested. |
+
+A node that both accepts and dials other nodes typically sets both `TlsServerCertificate` and
+`UseTls` (e.g. in a full mesh, where every node sets both). TLS is negotiated per connection
+direction, so a hub that only receives dials needs only the certificate, and a leaf that only dials
+needs only `UseTls`.
+
+Wire order per connection: TCP connect → TLS handshake (only when configured for that direction) →
+cluster handshake frames (`0x01`) → envelope/heartbeat frames. Because the TLS handshake always
+precedes the first cluster frame, no plaintext frame bytes ever leak onto an encrypted link, and
+everything above the stream is unchanged: frame parsing, heartbeats, pending-call tracking, and
+reconnection behave identically over TLS. A reconnect dials a fresh TCP connection and therefore
+always runs a fresh TLS handshake with a fresh `SslStream` — a re-used plaintext stream can never be
+mistaken for an authenticated one.
+
+#### Fail-fast on configuration mismatch
+
+If one side of a link enables TLS and the other does not, the handshake can never complete. Both
+sides fail their connection in bounded time instead of hanging:
+
+- **TLS client → plaintext server**: the server parses the TLS `ClientHello` as a frame header whose
+  announced length (~50 MB) exceeds `MaxFrameBytes` (default 16 MB) and immediately closes the
+  connection; the client's handshake then fails on the closed stream. With the frame guard disabled
+  (`MaxFrameBytes = int.MaxValue`) the client still gives up when `ConnectTimeout` elapses.
+- **Plaintext client → TLS server**: the server's TLS handshake rejects the cluster frame bytes as
+  an invalid TLS record and closes the connection; the client fails while waiting for the handshake
+  reply (or on `ConnectTimeout`).
+
+In both directions the TLS handshake shares the dial's `ConnectTimeout` budget, so the worst case is
+a bounded, observable failure — never a stalled connection or an endlessly retried handshake. The
+caller's `CallAsync` fails with the raw handshake error (an `AuthenticationException` or
+`IOException`), the pending call is drained, and the server side logs
+`Failed to process incoming connection` (warning level).
+
+#### Limitations
+
+- No mutual TLS: the server does not request client certificates, so
+  `RemoteCertificateValidationCallback` only ever validates the server certificate.
+- The client handshake's `TargetHost` is the registry endpoint address (an IP literal for static
+  registries), so name-based certificate validation requires either DNS-based registry entries or a
+  validation callback.
+- No knobs for protocol versions or cipher suites (platform defaults apply — TLS 1.2/1.3); the
+  server certificate must carry a private key usable for server authentication.
+
 ## KcpTransport
 
 `KcpTransport` runs one KCP session per remote node over a single UDP socket bound to the node's
@@ -185,6 +249,10 @@ types are used outside the vendored folder.
 
 ## Testing
 
+- `tests/Skynet.Core.Tests/TcpTransportTlsTests.cs` — optional TLS on `TcpTransport`: encrypted
+  cross-node `CallAsync` roundtrip (self-signed in-memory certificate + trust callback), TLS/plaintext
+  mismatch fail-fast in both directions within bounded time, and client-side certificate rejection
+  (connection closed, logged on the server, observable at the caller).
 - `tests/Skynet.Transport.Kcp.Tests/Reliable/ReliableQueueTests.cs` — windowing, ack/una, reorder,
   wraparound, fast resend, RTO adaptation, Karn sampling, dead-link terminal state, `Reset`, codec.
 - `tests/Skynet.Transport.Kcp.Tests/Reliable/ReliableLossyPipeTests.cs` — two queues wired through
