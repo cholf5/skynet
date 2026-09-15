@@ -107,7 +107,23 @@ Chaos 集成 `TcpTransportFaultInjectionTests`（5，真实 loopback 双节点�
 - 无无关顺手修复（TcpTransport 仅加 hook，diff 最小化）。
 
 ## Review 意见
-（待填）
+- PM 审查 TcpTransport hook diff：`StreamDecorator` 默认 null 零改动，每连接一次、TLS 之后集群帧之前、
+  双向生效；委托异常即连接建立失败，语义明确。装饰点选在 TLS 内侧（帧级注入）使丢帧决策作用于
+  重组后的完整帧——消息损坏在构造上不可能，PM 认可该设计。
+- 注入点选 a（Stream 装饰）而非 b（ITransport 装饰）的理由成立：半开语义在 envelope 层无法构造。
+- 确定性手段（固定 Seed、FrameSelector 排除握手/心跳、无实时断言）满足 chaos 测试的复现要求。
+- pre-existing 观察：并行全量下 Skynet.Net.Tests 出现过一次偶发失败（单独复跑 96/96），与 E-9 agent
+  的观察相互印证，已列为独立跟踪项，不在本任务处理。
+- 结论：**通过**。
 
 ## QA 记录
-（待填）
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | 20% 丢包 | ✅ 成功则内容精确断言；失败则 1s 有界 TaskCanceledException，DroppedFrameCount 精确对账 |
+| 2 | 远端 kill → restart（全程延迟注入） | ✅ 恢复后调用可继续 |
+| 3 | 延迟抖动按序处理 | ✅ 0–40ms 均匀抖动下顺序断言 |
+| 4 | 半开 → 死链判定 → 恢复 | ✅ 300ms 宽限 + 有界异常 |
+| 5 | 新增测试确定性 | ✅ 连续 3 次全量复跑全绿（agent 累计 7 次） |
+| 6 | PM 独立复跑全量测试 | ✅ 266/266（Skynet.sln，net10.0） |
+
+无 P0/P1 问题。**QA Passed**
