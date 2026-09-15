@@ -69,3 +69,25 @@ compose 无法实机运行，但组网逻辑（环境变量覆盖 + 静态注册
 - `Dockerfile`
 - `scripts/publish-packages.sh`
 - `docs/release-guide.md`
+
+## Review 意见
+> PM 审查记录（2026-09-15）：
+- 组网方案：环境变量覆盖（SKYNET_NODE_{ID}_HOST 等）优于 host 网络（Docker Desktop 限制），PM 认可；
+  C# 改动严格限定在 Examples 层，默认路径行为不变（不设环境变量仍 4010/4011 回环）。
+- BUG-1（agent 冒烟发现并修复）：示例工程跨节点 EchoRequest 从未可用（MessagePack 3.x 需显式注解 +
+  contract id 注册）——与 E-3 基准工程踩过的坑同源，修复范围正确（仅 Examples + 启动期注册）。
+- compose 静态校验（PyYAML + 字段断言 + healthcheck 脚本 bash -n）通过；2112 加引号防 YAML int 化是好细节。
+- 无 docker 环境下用真实双进程做了功能等价冒烟（host 覆盖、gate 入集群、心跳链路 lsof 验证），验证思路合理。
+- 遗留：compose 全链路与新 CI 工作流未实机运行，QA 降级为 P2 待办（见下）。
+- 结论：**通过**。
+
+## QA 记录
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | compose YAML 语法与拓扑断言 | ✅ 静态校验通过 |
+| 2 | healthcheck 脚本语法 | ✅ bash -n / sh -n |
+| 3 | 无 docker 功能等价冒烟 | ✅ 双节点 host 覆盖 + probe 往返 + gate 入集群 + 2112/8080 连通 |
+| 4 | C# 改动回归 | ✅ 250/250（PM 独立复跑，Skynet.sln，net10.0） |
+| 5 | docker compose up 实机验证 | ⚠️ P2 待办：本机无 docker，待有 docker 环境实测（QA 建议保留此备注） |
+
+无 P0/P1 问题（P2 待实测项已记录）。**QA Passed（含 P2 遗留）**
