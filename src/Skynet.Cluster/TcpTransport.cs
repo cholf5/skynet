@@ -330,7 +330,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		}
 
 		var connection = new TcpConnection(this, client, outbound: true, _logger, _options.HeartbeatInterval,
-			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions, tlsClientOptions: tlsClientOptions);
+			_deadNodeGracePeriod, _options.MaxFrameBytes, _serializerOptions, tlsClientOptions: tlsClientOptions,
+			streamDecorator: _options.StreamDecorator);
 		try
 		{
 			await connection.InitializeAsync(_registry.LocalNodeId!, connectCts.Token).ConfigureAwait(false);
@@ -369,7 +370,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					{
 						connection = new TcpConnection(this, client!, outbound: false, _logger,
 							_options.HeartbeatInterval, _deadNodeGracePeriod, _options.MaxFrameBytes,
-							_serializerOptions, _options.TlsServerCertificate);
+							_serializerOptions, _options.TlsServerCertificate,
+							streamDecorator: _options.StreamDecorator);
 						await connection.InitializeAsync(_registry.LocalNodeId!, _cts.Token).ConfigureAwait(false);
 						if (await TryRegisterInboundConnectionAsync(connection).ConfigureAwait(false))
 						{
@@ -678,6 +680,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 		private readonly NetworkStream _networkStream;
 		private readonly X509Certificate2? _tlsServerCertificate;
 		private readonly SslClientAuthenticationOptions? _tlsClientOptions;
+		private readonly Func<Stream, Stream>? _streamDecorator;
 		private Stream _stream;
 		private readonly bool _outbound;
 		private readonly ILogger _logger;
@@ -697,7 +700,8 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			TimeSpan heartbeatInterval, TimeSpan deadNodeGracePeriod, int maxFrameBytes,
 			MessagePackSerializerOptions serializerOptions,
 			X509Certificate2? tlsServerCertificate = null,
-			SslClientAuthenticationOptions? tlsClientOptions = null)
+			SslClientAuthenticationOptions? tlsClientOptions = null,
+			Func<Stream, Stream>? streamDecorator = null)
 		{
 			_transport = transport;
 			_client = client;
@@ -709,6 +713,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 			_serializerOptions = serializerOptions;
 			_tlsServerCertificate = tlsServerCertificate;
 			_tlsClientOptions = tlsClientOptions;
+			_streamDecorator = streamDecorator;
 			_networkStream = client.GetStream();
 			_stream = _networkStream;
 		}
@@ -738,6 +743,7 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					await AuthenticateTlsAsClientAsync(cancellationToken).ConfigureAwait(false);
 				}
 
+				ApplyStreamDecorator();
 				await SendHandshakeAsync(localNodeId, cancellationToken).ConfigureAwait(false);
 				var handshake = await ReadHandshakeAsync(cancellationToken).ConfigureAwait(false);
 				_remoteNodeId = handshake.NodeId;
@@ -749,10 +755,27 @@ public sealed class TcpTransport : ITransport, IAsyncDisposable
 					await AuthenticateTlsAsServerAsync(cancellationToken).ConfigureAwait(false);
 				}
 
+				ApplyStreamDecorator();
 				var handshake = await ReadHandshakeAsync(cancellationToken).ConfigureAwait(false);
 				_remoteNodeId = handshake.NodeId;
 				await SendHandshakeAsync(localNodeId, cancellationToken).ConfigureAwait(false);
 			}
+		}
+
+		/// <summary>
+		/// Wraps the connection stream in the decorator configured through
+		/// <see cref="TcpTransportOptions.StreamDecorator"/> (test-only fault injection). Runs once
+		/// after the TLS layer is in place and before any cluster frame is exchanged, so the
+		/// decorator sees exactly the framed cluster protocol traffic.
+		/// </summary>
+		private void ApplyStreamDecorator()
+		{
+			if (_streamDecorator is null)
+			{
+				return;
+			}
+
+			_stream = _streamDecorator(_stream);
 		}
 
 		/// <summary>
@@ -1145,6 +1168,22 @@ public sealed class TcpTransportOptions
 	/// never invokes this callback (client certificates are not requested).
 	/// </summary>
 	public RemoteCertificateValidationCallback? RemoteCertificateValidationCallback
+	{
+		get;
+		init;
+	}
+
+	/// <summary>
+	/// Gets or sets an optional decorator invoked once per connection with the fully established
+	/// stream (TLS-wrapped when configured) before any cluster frame is exchanged, and applied to
+	/// both inbound and outbound connections. The returned stream replaces the connection stream,
+	/// which enables transport-level fault injection (for example
+	/// <see cref="FaultInjectingStream"/> for chaos testing: frame loss, write delay, half-open
+	/// links, and manual disconnects). When <see langword="null"/> (the default) the connection
+	/// stream is used unchanged. The callback must return a non-null stream; an exception it
+	/// throws fails the connection during establishment.
+	/// </summary>
+	public Func<Stream, Stream>? StreamDecorator
 	{
 		get;
 		init;
