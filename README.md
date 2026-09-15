@@ -75,6 +75,8 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - [MsgServer 业务路由](docs/msg-server.md)
 - [放置策略](docs/placement.md)
 - [持久化插件](docs/persistence.md)
+- [ADR-0001 Actor 可重入语义](docs/adr/0001-actor-reentrancy-semantics.md)
+- [ADR-0002 框架边界与生态引用策略](docs/adr/0002-framework-scope-and-ecosystem-boundary.md)
 
 ## 核心能力
 
@@ -86,6 +88,11 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - GateServer：统一 TCP/WebSocket 接入，SessionActor 生命周期管理、心跳超时和断线重连策略，附带端到端集成测试。
 - DebugConsole 调试控制台：提供 Telnet/Netcat 接入、list/info/trace/kill 命令以及实时指标快照。
 - 核心单元测试：覆盖顺序性、异常处理、唯一服务解析等关键场景。
+
+> **范围声明**：本仓库是基础框架，只收"有唯一合理解"的基础设施；数据库适配、品类设施等
+> 属于生态层，不进本仓库（见 [ADR-0002](docs/adr/0002-framework-scope-and-ecosystem-boundary.md)）。
+> `Skynet.Extras` 中的组件是插件接缝的**可选参考实现**，不是框架的一部分，可以完全不用它
+> 而自行实现同等能力。
 
 ## 声明接口并生成代理
 
