@@ -36,3 +36,4 @@
 ## Notes & Updates
 - 2026-09-13：任务创建。注意：TCP 之上不需要 ReliableQueue（纯开销）；此任务仅在引入 UDP/KCP 时执行。
 - 2026-09-13：完成。commit `6fcf00c`，验收 136/136。交付边界：ReliableQueue 完整 + 真实 UDP KcpTransport；Gate 接入/加密握手联动/压测曲线留后续。
+- 2026-09-15：**BUG 修复（P1，CI 偶发）**：`KcpStaleResponseTests.KcpTransport_ShouldDropStaleResponseWithoutLocalDelivery` 在 CI 2 核环境下偶发失败（run #27/#28，本地无法复现）。根因：测试用固定 150ms 定时取消，与 KCP 拨号握手竞争——慢机器上握手超过 150ms 时，`KcpTransport.ConnectAsync` 的取消路径会静默 dispose 连接并退休 conversation id（这是传输层唯一的静默关闭路径），请求根本没发出；node2 对握手段的重传（7 次 = KCP 重传预算）全部命中 "retired conversation" 丢弃日志，"late response" 从未产生，断言超时失败。修复：改为由远端 actor 在开始处理请求时发 `TaskCompletionSource` 信号，测试收到信号后再取消——精确对应"调用方在远端处理期间取消"的语义，消除对拨号速度的假设；stale-response 等待上限 5s→10s 增加 CI 余量。验证：4 个 CPU 满载进程挤占环境下连跑 15 次全部通过；全量 216 测试通过。
