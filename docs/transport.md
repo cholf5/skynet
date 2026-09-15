@@ -240,6 +240,70 @@ When a node receives an envelope whose payload contract id is not registered:
 - Legacy wire versions (below 3) still tear the connection down so mixed-version clusters fail
   loudly instead of silently losing traffic.
 
+## Fault injection and chaos testing (FaultInjectingStream)
+
+Skynet ships a reusable chaos component for stream transports: `Skynet.Cluster.FaultInjectingStream`,
+a `Stream` decorator that degrades a cluster connection in reproducible ways. It is wired in through
+`TcpTransportOptions.StreamDecorator`, an optional per-connection stream factory:
+
+```csharp
+var options = new TcpTransportOptions
+{
+	HeartbeatInterval = TimeSpan.FromSeconds(1),
+	StreamDecorator = stream => new FaultInjectingStream(stream, new FaultInjectionOptions
+	{
+		Seed = 20260915,          // every fault decision comes from this seeded source
+		DropRate = 0.20,          // 20% of affected frames vanish
+		MinWriteDelay = TimeSpan.Zero,
+		MaxWriteDelay = TimeSpan.FromMilliseconds(40),   // uniform write-delay jitter
+		// Optional: restrict faults to data frames, keep control traffic healthy.
+		FrameSelector = frame => frame.FrameType == FaultInjectionFrameType.Envelope
+	})
+};
+```
+
+The decorator is invoked once per connection (inbound and outbound) after the TLS layer is
+established and before any cluster frame is exchanged, so it observes exactly the framed cluster
+protocol (`Handshake = 1`, `Envelope = 2`, `Heartbeat = 3`). When `StreamDecorator` is `null` (the
+default) the connection stream is used unchanged — no fault injection code runs.
+
+### Capabilities
+
+| Capability | API | Semantics |
+|---|---|---|
+| Frame loss | `FaultInjectionOptions.DropRate` | Affected frames are silently dropped **whole** (frames are reassembled from written bytes first), so the remaining byte stream stays aligned and the connection survives. Dropped envelope requests surface at the caller as a bounded `CallAsync` timeout. |
+| Write delay | `MinWriteDelay` / `MaxWriteDelay` | Uniform distribution over `[min, max]` (equal bounds = fixed delay). Delayed frames are released in write order — a frame never overtakes an earlier one — preserving the ordered delivery semantics of the underlying stream. |
+| Half-open link | `StallReads()` / `ResumeReads()` | The local side stops consuming incoming frames (heartbeats included) without closing the connection. Its own dead-node detection then fires after `DeadNodeGracePeriod` (D-3 semantics), failing pending calls with `RemoteConnectionClosedException`. |
+| Manual disconnect | `BreakConnection()` | Fails pending reads, makes subsequent writes throw `IOException`, disposes the inner stream so the peer notices immediately. |
+| Introspection | `SelectedFrameCount`, `DroppedFrameCount`, `DelayedFrameCount`, `ForwardedFrameCount`, `IsBroken` | Assert that chaos was actually applied (and how much) without depending on timing. |
+
+All random decisions (drop draws, delay samples) come from a single `Random` seeded with
+`FaultInjectionOptions.Seed`, so the same seed over the same frame sequence reproduces the identical
+fault pattern. Write completion means the frame was accepted for delivery (mirroring TCP buffering),
+not that it reached the inner stream — a dropped frame is swallowed exactly like a lost packet.
+
+Deliberate limitations: only frame-atomic loss is provided (dropping individual *write calls* would
+corrupt the byte stream and turn "loss" into connection teardown, a different failure class), and
+there are no read-side drop/delay faults — the half-open stall covers the read direction.
+
+### Chaos test coverage
+
+`tests/Skynet.Core.Tests/TcpTransportFaultInjectionTests.cs` runs these scenarios over real loopback
+TCP nodes; every wait is bounded (`WaitAsync`/polling budgets), so the suite can never hang:
+
+| Scenario | Fault | Expected |
+|---|---|---|
+| Sustained 20% envelope loss on the caller | seeded drop, control frames excluded | Each call either delivers intact content (`echo:<msg>`) or fails within the caller timeout (`TaskCanceledException`); dropped-frame count matches failed-call count exactly; the link stays usable afterwards. |
+| Write-delay jitter | uniform 0–40 ms per envelope frame | Receiver processes all 25 messages in wire order; nothing is lost or corrupted. |
+| Half-open link | `StallReads()` on the callee side | The silent peer is declared dead within the grace period; the pending call fails bounded with `RemoteConnectionClosedException`; a follow-up call succeeds on a fresh connection. |
+| Manual disconnect mid-call | `BreakConnection()` on the caller side | The in-flight call fails bounded with `RemoteConnectionClosedException`; recovery call succeeds. |
+| Node kill + restart under delay injection | 0–25 ms envelope delay throughout | Warm-up call, node disposal, reconnect, and a follow-up call all complete with intact content. |
+
+Determinism rules used by the suite: fixed seeds everywhere, `FrameSelector` excludes handshake and
+heartbeat frames so control traffic consumes no randomness and the number of fault decisions is a
+pure function of the test's own traffic, and no assertion compares wall-clock durations (only
+upper bounds on waiting).
+
 ## Third-party notice
 
 `src/Skynet.Transport.Kcp/ThirdParty/kcp2k/` contains the vendored managed KCP core from
@@ -261,3 +325,8 @@ types are used outside the vendored folder.
 - `tests/Skynet.Transport.Kcp.Tests/KcpTransportTests.cs` — cross-node `CallAsync`, fire-and-forget
   `SendAsync`, and source-generated RPC proxy roundtrips over `KcpTransport`, mirroring
   `TcpTransportTests`.
+- `tests/Skynet.Core.Tests/FaultInjectingStreamTests.cs` — unit tests of the fault injection
+  component itself: frame reassembly, seeded loss determinism, delay ordering, half-open stall,
+  cancellation, manual disconnects, and options validation.
+- `tests/Skynet.Core.Tests/TcpTransportFaultInjectionTests.cs` — chaos integration tests over real
+  TCP nodes (see the fault injection section above for the coverage matrix).
