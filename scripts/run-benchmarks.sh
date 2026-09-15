@@ -12,9 +12,6 @@ mkdir -p "$out_dir"
 echo "Building benchmarks (Release)..."
 dotnet build benchmarks/Skynet.Benchmarks -c Release --nologo -v q
 
-# .NET 9 is the target framework; allow running on a newer local runtime (CI installs 9.0.x).
-export DOTNET_ROLL_FORWARD="${DOTNET_ROLL_FORWARD:-LatestMajor}"
-
 for scenario in local-tell local-call remote-call; do
 	echo "=== $scenario (${duration}s) ==="
 	dotnet run --project benchmarks/Skynet.Benchmarks -c Release --no-build -- \

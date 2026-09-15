@@ -1,0 +1,12 @@
+scenario:     local-call
+duration:     5.003s
+concurrency:  4
+total ops:    3077100
+ops/sec:      615,055
+latency min:  0.067 ms
+latency p50:  0.512 ms
+latency p90:  0.95 ms
+latency p99:  2.204 ms
+latency max:  2442.288 ms
+
+JSON results written to /Users/theo/dev/cholf5/skynet/benchmarks/results/20260915-080433-local-call-c4.json

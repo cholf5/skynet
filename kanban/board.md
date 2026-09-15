@@ -13,7 +13,7 @@
 - _None_
 
 ## In Progress
-- [ ] [E-11 升级到 .NET 10（net9.0 → net10.0）](issues/E-11-dotnet-10-upgrade.md) — Owner: AI Agent — Complexity: M
+- _None_
 
 ## In Review
 - _None_
@@ -25,6 +25,7 @@
 - _None_
 
 ## Done
+- [x] [E-11 升级到 .NET 10（net9.0 → net10.0）](issues/E-11-dotnet-10-upgrade.md) — Owner: AI Agent — Complexity: M
 - [x] [E-3 Benchmark 工程 + 基线压测报告](issues/E-3-benchmark-baseline.md) — Owner: AI Agent — Complexity: M
 - [x] [E-2 Prometheus 指标导出插件](issues/E-2-prometheus-metrics-exporter.md) — Owner: AI Agent — Complexity: M
 - [x] [E-1 Gate 限流 hook（连接准入 + 入站帧限速）](issues/E-1-gate-rate-limiting.md) — Owner: AI Agent — Complexity: S
