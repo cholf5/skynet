@@ -35,3 +35,4 @@
 ## Notes & Updates
 - 2025-09-29：任务创建，等待排期。
 - 2025-09-30：集中在 `Directory.Build.props/targets` 中补齐打包元数据，新增打包验证脚本与 GitHub Actions 发布流水线，更新 README 与 Dockerfile。所有测试脚本因当前环境缺少 .NET CLI 无法运行，已在测试用例中标注。
+- 2026-09-15：**BUG 修复（P1）**：`release.yml` 在 job 级 `if:` 中使用了 `secrets` 上下文（`if: secrets.NUGET_API_KEY != ''`），GitHub 不允许该上下文出现在 job 级条件中，导致整个 workflow 文件被判定为无效。症状：远端 19 次运行全部在启动前失败（零步骤执行）；且因触发配置无法解析，每次 push 到任意分支都会创建一个失败运行，运行名显示为文件路径而非 "Release Packages"。修复：删除 job 级 `if`，将 NUGET_API_KEY 判断移入发布步骤脚本内（未设置 secret 时打印提示并 exit 0）。已用 actionlint 1.7.7 验证通过。修复后该 workflow 仅在推送 `v*` 标签或手动触发（workflow_dispatch）时运行，日常 push 不再触发。
