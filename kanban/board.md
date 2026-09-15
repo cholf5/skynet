@@ -7,11 +7,11 @@
 - [ ] [E-6 传输层故障注入与 Chaos 测试](issues/E-6-transport-fault-injection.md) — Owner: AI Agent — Complexity: M
 
 ## To Do
-- [ ] [E-7 日志级别热 reload](issues/E-7-logging-hot-reload.md) — Owner: AI Agent — Complexity: S
+- _None_
 
 ## In Progress
 - [ ] [E-4 跨节点 TLS（TcpTransport 可选 SslStream 加密）](issues/E-4-tcp-transport-tls.md) — Owner: AI Agent — Complexity: M
-- [ ] [E-5 MsgServer 业务路由层](issues/E-5-msg-server-routing.md) — Owner: AI Agent — Complexity: M
+- [ ] [E-7 日志级别热 reload](issues/E-7-logging-hot-reload.md) — Owner: AI Agent — Complexity: S
 
 ## In Review
 - _None_
@@ -23,6 +23,7 @@
 - _None_
 
 ## Done
+- [x] [E-5 MsgServer 业务路由层](issues/E-5-msg-server-routing.md) — Owner: AI Agent — Complexity: M
 - [x] [E-11 升级到 .NET 10（net9.0 → net10.0）](issues/E-11-dotnet-10-upgrade.md) — Owner: AI Agent — Complexity: M
 - [x] [E-3 Benchmark 工程 + 基线压测报告](issues/E-3-benchmark-baseline.md) — Owner: AI Agent — Complexity: M
 - [x] [E-2 Prometheus 指标导出插件](issues/E-2-prometheus-metrics-exporter.md) — Owner: AI Agent — Complexity: M
