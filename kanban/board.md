@@ -4,10 +4,11 @@
 - _None_
 
 ## To Do
-- _None_
+- [ ] [F-2 ConnectAsync 端口拒绝路径资源泄漏修复](issues/F-2-connect-async-leak-fix.md) — Owner: AI Agent — Complexity: S
+- [ ] [F-3 Skynet.Net.Tests 偶发失败排查与加固](issues/F-3-net-tests-flake-hardening.md) — Owner: AI Agent — Complexity: S/M
 
 ## In Progress
-- _None_
+- [ ] [F-1 ADR-0002 框架边界与生态引用策略（含 Extras 身份标注）](issues/F-1-adr-framework-boundary.md) — Owner: AI Agent — Complexity: S
 
 ## In Review
 - _None_
