@@ -52,7 +52,22 @@
 - 样例未单独新增 Example 工程（避免新建 csproj，遵循任务约束），以 `docs/msg-server.md` 示例 + 集成测试充当演示。
 
 ## Review 意见
-（待填）
+- PM 逐行审查 `MsgServerRouter.cs`：冻结语义（Volatile.Write/Read）、错误帧字符边界截断（二分查找）、
+  OCE 于会话取消时透传、`ForwardCoreAsync` 对 payload 做 ToArray 快照不外借内部缓冲，均正确。
+- 审查确认：未改动 GateServer/SessionActor 既有行为；命令表启动期注册、分发热路径零反射零锁。
+- 测试覆盖与声称一致（12 单元 + 3 Gate 集成，共 15 个用例）。
+- 遗留（已记录于 docs）：错误帧首字节 0x00 为约定，handler 自行 Send 的内容路由器无法拦截，
+  需 handler 响应不以 0x00 开头（文档已注明）。
+- 结论：**通过**。
 
 ## QA 记录
-（待填）
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | 已注册命令请求 → 目标 actor 收到并回包 | ✅ RegisteredCommand_Dispatches… + Gate_RegisteredCommand_RoundTripsThroughEchoActor |
+| 2 | 未注册协议号 → 错误帧 | ✅ UnknownCommand_ReceivesErrorFrame + Gate 集成 |
+| 3 | 业务 handler/actor 抛异常 → 错误帧且 session 存活 | ✅ HandlerFailure/TargetActorFailure + Gate 集成 |
+| 4 | 重复注册/保留 0x00/冻结后注册 | ✅ 3 个 ArgumentException/InvalidOperationException 用例 |
+| 5 | 错误文本超长截断 | ✅ EncodeErrorFrame_TruncatesLongErrorText |
+| 6 | PM 独立复跑全量测试 | ✅ 231/231（Skynet.sln，net10.0） |
+
+无 P0/P1 问题。**QA Passed**
