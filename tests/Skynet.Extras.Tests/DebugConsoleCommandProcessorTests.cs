@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Skynet.Core;
 using Skynet.Extras;
 using Xunit;
@@ -76,6 +77,91 @@ public class DebugConsoleCommandProcessorTests
 
 		result.Response.Should().Contain("terminated");
 		gateway.LastKilled.Should().Be(new ActorHandle(40));
+	}
+
+	[Fact]
+	public async Task HelpCommandShouldListLogLevelCommand()
+	{
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway());
+
+		var result = await processor.ExecuteAsync("help", CancellationToken.None).ConfigureAwait(false);
+
+		result.Response.Should().Contain("loglevel");
+	}
+
+	[Fact]
+	public async Task LogLevelCommandWithoutProviderShouldReportNotConfigured()
+	{
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway());
+
+		var query = await processor.ExecuteAsync("loglevel", CancellationToken.None).ConfigureAwait(false);
+		query.Response.Should().Contain("not configured");
+
+		var change = await processor.ExecuteAsync("loglevel Debug", CancellationToken.None).ConfigureAwait(false);
+		change.Response.Should().Contain("not configured");
+	}
+
+	[Fact]
+	public async Task LogLevelQueryShouldReturnCurrentLevel()
+	{
+		var provider = new LoggingHotReloadProvider();
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway(), provider);
+
+		var before = await processor.ExecuteAsync("loglevel", CancellationToken.None).ConfigureAwait(false);
+		before.Response.Should().Contain("Information");
+
+		provider.MinimumLevel = LogLevel.Warning;
+		var after = await processor.ExecuteAsync("loglevel", CancellationToken.None).ConfigureAwait(false);
+		after.Response.Should().Contain("Warning");
+	}
+
+	[Fact]
+	public async Task LogLevelCommandWithoutArgumentsShouldReportNotConfiguredWhenFilteringDisabled()
+	{
+		var provider = new LoggingHotReloadProvider { MinimumLevel = null };
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway(), provider);
+
+		var result = await processor.ExecuteAsync("loglevel", CancellationToken.None).ConfigureAwait(false);
+
+		result.Response.Should().Contain("not configured");
+	}
+
+	[Fact]
+	public async Task LogLevelSetCommandShouldApplyToProvider()
+	{
+		var provider = new LoggingHotReloadProvider();
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway(), provider);
+
+		var result = await processor.ExecuteAsync("loglevel warning", CancellationToken.None).ConfigureAwait(false);
+
+		result.Response.Should().Contain("Minimum log level set to Warning");
+		result.Response.Should().Contain("previous: Information");
+		provider.MinimumLevel.Should().Be(LogLevel.Warning);
+	}
+
+	[Fact]
+	public async Task LogLevelSetCommandShouldAcceptUppercaseNames()
+	{
+		var provider = new LoggingHotReloadProvider();
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway(), provider);
+
+		var result = await processor.ExecuteAsync("loglevel DEBUG", CancellationToken.None).ConfigureAwait(false);
+
+		provider.MinimumLevel.Should().Be(LogLevel.Debug);
+	}
+
+	[Fact]
+	public async Task LogLevelInvalidValueShouldFailWithoutChangingLevel()
+	{
+		var provider = new LoggingHotReloadProvider();
+		var processor = new DebugConsoleCommandProcessor(new FakeGateway(), provider);
+		await processor.ExecuteAsync("loglevel Error", CancellationToken.None).ConfigureAwait(false);
+
+		var result = await processor.ExecuteAsync("loglevel verbose", CancellationToken.None).ConfigureAwait(false);
+
+		result.Response.Should().Contain("Unknown log level 'verbose'");
+		result.Response.Should().Contain("Trace, Debug, Information, Warning, Error, Critical, None");
+		provider.MinimumLevel.Should().Be(LogLevel.Error);
 	}
 
 	private sealed class FakeGateway : IDebugConsoleActorGateway
