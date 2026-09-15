@@ -61,17 +61,25 @@ public sealed class KcpStaleResponseTests
 			options: new ActorSystemOptions { ClusterRegistry = registry2 },
 			transportFactory: sys => new KcpTransport(sys, registry2, CreateKcpTestOptions(),
 				loggerFactory2));
-		await system2.CreateActorAsync(() => new DelayEchoActor(), "delayEcho",
+		var requestReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		await system2.CreateActorAsync(() => new DelayEchoActor(requestReceived), "delayEcho",
 			new ActorCreationOptions { HandleOverride = new ActorHandle(2001) });
 
-		using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
-		Func<Task> act = async () => await system1.CallAsync<string>(new ActorHandle(2001),
-			new EchoRequest("late"), cancellationToken: cts.Token);
+		// Cancel only after the request has actually reached the remote actor. A fixed cancellation
+		// timer races the dial: on a slow CI machine the handshake can outlive it, the transport then
+		// aborts the connect and the request is never sent at all — no late response can exist and
+		// the stale-response assertion below fails spuriously.
+		using var cts = new CancellationTokenSource();
+		var callTask = system1.CallAsync<string>(new ActorHandle(2001), new EchoRequest("late"),
+			cancellationToken: cts.Token);
+		await requestReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
+		cts.Cancel();
+		Func<Task> act = () => callTask;
 		await act.Should().ThrowAsync<OperationCanceledException>();
 
-		// The remote actor keeps processing; its response arrives ~500ms in, after the pending
-		// call was already removed by the cancellation above.
-		await loggerFactory.WaitForLogAsync("Dropped a stale response", TimeSpan.FromSeconds(5));
+		// The remote actor keeps processing; its response arrives ~500ms after the request, after the
+		// pending call was already removed by the cancellation above.
+		await loggerFactory.WaitForLogAsync("Dropped a stale response", TimeSpan.FromSeconds(10));
 
 		// Regression guard: if the stale response were dispatched to a local actor instead of
 		// dropped, the failed delivery would complete a response source, and the resulting fault
@@ -102,11 +110,13 @@ public sealed class KcpStaleResponseTests
 		return ((IPEndPoint)client.Client.LocalEndPoint!).Port;
 	}
 
-	private sealed class DelayEchoActor : Actor
+	private sealed class DelayEchoActor(TaskCompletionSource requestReceived) : Actor
 	{
 		protected override async Task<object?> ReceiveAsync(MessageEnvelope envelope, CancellationToken cancellationToken)
 		{
-			// Short handler delay so a late response reliably arrives after the caller canceled.
+			// Signal first so the caller can cancel while the handler is still running, then delay so
+			// the response reliably arrives after the caller canceled.
+			requestReceived.TrySetResult();
 			await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
 			return envelope.Payload is EchoRequest request ? $"delayed:{request.Message}" : null;
 		}
