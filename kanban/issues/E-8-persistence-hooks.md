@@ -104,10 +104,29 @@
   配合 WAL（预留）减小窗口。
 
 ## Review（待填）
+
+> PM 审查记录（2026-09-15）：
+- PM 逐行审查 ActorSystem.cs（+195）：snapshot/restore 走既有 MailboxMessage 系统回调路径（与 C-8 定时器同机制，ActorHost.cs:157 分发，不经过用户 ReceiveAsync）——核实通过，无新增并发语义。
+- capture 在 actor 循环内 await 落盘 = 一致性检查点（取舍已在 remarks 论证）；restore 读在循环外、应用在循环内，返回后消息必然观察到恢复后状态；ActorHost.Stopped 守卫防 actor 停机挂死。
+- 零开销验证：未注册 store 时消息路径无任何检查；未实现 ISnapshotable 的 actor 与持久化零接触。
+- Extras 引 MessagePack 直引（中心版本管理）可接受；未注册/冷启动/损坏三类失败语义清晰。
+- 结论：**通过**。
 - 审查者：
 - 意见：
 
 ## QA（待填）
+
+> PM QA 记录（2026-09-15）：
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | Save → Load roundtrip | ✅ 含非 ASCII key、1 MiB payload |
+| 2 | 快照文件损坏 | ✅ 截断/乱字节/尾部垃圾 → SnapshotCorruptedException |
+| 3 | 未注册 store 的 actor | ✅ 零接触断言 + 既有 250 测试全绿 |
+| 4 | 并发写原子性 | ✅ 12 并发最终文件完整可读 |
+| 5 | 端到端（保存 → 新实例 → 恢复） | ✅ 跨 ActorSystem 演示 |
+| 6 | PM 独立复跑全量测试 | ✅ 272/272（Skynet.sln，net10.0） |
+
+无 P0/P1 问题。**QA Passed**
 - 执行记录：
 - BUG 分级：
 - QA Passed：
