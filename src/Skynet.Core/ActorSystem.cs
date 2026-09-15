@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using MessagePack;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Skynet.Core.Persistence;
 
 namespace Skynet.Core;
 
@@ -22,6 +23,7 @@ public sealed class ActorSystem : IAsyncDisposable
 	private readonly long _handleOffset;
 	private readonly IClusterRegistry? _clusterRegistry;
 	private readonly ActorTimerScheduler _timers;
+	private IActorSnapshotStore? _snapshotStore;
 	private long _nextHandle;
 	private long _nextMessageId;
 	private bool _disposed;
@@ -68,6 +70,32 @@ public sealed class ActorSystem : IAsyncDisposable
 	/// Gets the metrics collector used by the actor system.
 	/// </summary>
 	public ActorMetricsCollector Metrics { get; }
+
+	/// <summary>
+	/// Gets the optional snapshot store registered via <see cref="UseSnapshotStore"/>, or
+	/// <see langword="null"/> when persistence is not enabled. Until a store is registered the
+	/// persistence hooks have no effect on the system: no allocations, no checks on the message
+	/// path, identical behavior for every actor.
+	/// </summary>
+	public IActorSnapshotStore? SnapshotStore => _snapshotStore;
+
+	/// <summary>
+	/// Registers the optional persistence plugin. This is the only assembly point for snapshot
+	/// persistence: without it, <see cref="SnapshotActorAsync"/> and
+	/// <see cref="RestoreActorSnapshotAsync"/> fail fast and actors never perform any I/O.
+	/// Registering a store never changes actor behavior on its own — snapshots are only taken or
+	/// restored when the caller explicitly invokes the corresponding methods, and only for actors
+	/// implementing <see cref="ISnapshotable"/>.
+	/// </summary>
+	/// <param name="store">The store implementation to use. A previously registered store is replaced.</param>
+	/// <exception cref="ArgumentNullException">Thrown when <paramref name="store"/> is <see langword="null"/>.</exception>
+	/// <exception cref="ObjectDisposedException">Thrown when the system has been disposed.</exception>
+	public void UseSnapshotStore(IActorSnapshotStore store)
+	{
+		ArgumentNullException.ThrowIfNull(store);
+		ThrowIfDisposed();
+		_snapshotStore = store;
+	}
 
 	/// <summary>
 	/// Raised when a generated void (send) proxy observes that a fire-and-forget enqueue failed
@@ -347,6 +375,173 @@ public sealed class ActorSystem : IAsyncDisposable
 		}
 
 		return await RemoveActorAsync(handle).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Explicitly captures and stores a snapshot of the actor's state.
+	/// </summary>
+	/// <remarks>
+	/// <para>
+	/// The capture runs <em>on the actor's message loop</em> as a mailbox system callback: it is
+	/// serialized with all pending and subsequent messages, so the snapshot reflects a consistent
+	/// state with no message interleaved before or during capture, and no actor state is ever read
+	/// from an outside thread. The store write is awaited before the actor processes further
+	/// messages, which makes the returned snapshot a durable checkpoint of the mailbox position.
+	/// </para>
+	/// <para>
+	/// Restore timing is deliberately explicit: this framework never reads the store (and never
+	/// performs any persistence I/O) on its own — neither during actor creation nor in
+	/// <see cref="Actor.HandleStartAsync"/>. Applications call
+	/// <see cref="RestoreActorSnapshotAsync"/> when they decide a fresh instance should resume
+	/// from persisted state (see docs/persistence.md for the rationale).
+	/// </para>
+	/// </remarks>
+	/// <param name="handle">The handle of the actor to snapshot.</param>
+	/// <param name="actorKey">The stable persistence key of the actor (survives handle recycling).</param>
+	/// <param name="generation">The generation to save under; <see langword="null"/> saves into the unversioned overwrite slot (<see cref="ActorSnapshotKey.Unversioned"/>).</param>
+	/// <param name="cancellationToken">Token used to cancel the operation.</param>
+	/// <returns>The stored snapshot.</returns>
+	/// <exception cref="ArgumentException">Thrown when <paramref name="actorKey"/> is null or empty.</exception>
+	/// <exception cref="InvalidOperationException">Thrown when no snapshot store is registered, or the actor does not implement <see cref="ISnapshotable"/>.</exception>
+	/// <exception cref="KeyNotFoundException">Thrown when no actor with <paramref name="handle"/> exists.</exception>
+	/// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="generation"/> is negative.</exception>
+	public async Task<ActorSnapshot> SnapshotActorAsync(ActorHandle handle, string actorKey, long? generation = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(actorKey);
+		ThrowIfDisposed();
+		if (generation.HasValue && generation.Value < ActorSnapshotKey.Unversioned)
+		{
+			throw new ArgumentOutOfRangeException(nameof(generation), "The snapshot generation must not be negative.");
+		}
+
+		var store = _snapshotStore ??
+			throw new InvalidOperationException("No snapshot store is registered. Call UseSnapshotStore before taking snapshots.");
+		var (host, snapshotable) = ResolveSnapshotableActor(handle);
+		var effectiveGeneration = generation ?? ActorSnapshotKey.Unversioned;
+
+		var completion = new TaskCompletionSource<ActorSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var envelope = CreateEnvelope(handle, ActorHandle.None, CallType.Send, new SnapshotRequested(handle));
+		var message = new MailboxMessage(envelope, async token =>
+		{
+			try
+			{
+				var payload = await snapshotable.CaptureSnapshotAsync(token).ConfigureAwait(false);
+				var snapshot = new ActorSnapshot(actorKey, effectiveGeneration, DateTimeOffset.UtcNow, payload);
+				await store.SaveAsync(snapshot, token).ConfigureAwait(false);
+				completion.TrySetResult(snapshot);
+			}
+			catch (Exception exception)
+			{
+				// Failures (including the actor's own capture errors) surface to the caller of this
+				// method; they neither kill the actor nor invoke its error hook, because this is a
+				// caller-driven operation rather than regular message processing.
+				completion.TrySetException(exception);
+			}
+		});
+
+		await host.EnqueueAsync(message, cancellationToken).ConfigureAwait(false);
+		return await AwaitSnapshotHookAsync(completion, host, handle, "snapshot", cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Explicitly restores an actor's state from a previously stored snapshot.
+	/// </summary>
+	/// <remarks>
+	/// The store read happens off the actor loop (the mailbox stays free during store I/O); the
+	/// payload is then applied on the actor's message loop, so messages the caller sends after
+	/// this method returns are guaranteed to observe the restored state. Intended to be called
+	/// once, right after the actor instance is created.
+	/// </remarks>
+	/// <param name="handle">The handle of the actor to restore into.</param>
+	/// <param name="actorKey">The stable persistence key under which the snapshot was saved.</param>
+	/// <param name="generation">The generation to load; <see langword="null"/> loads the latest available generation.</param>
+	/// <param name="cancellationToken">Token used to cancel the operation.</param>
+	/// <returns>The snapshot that was applied, or <see langword="null"/> when the store holds no snapshot for the key.</returns>
+	/// <exception cref="ArgumentException">Thrown when <paramref name="actorKey"/> is null or empty.</exception>
+	/// <exception cref="InvalidOperationException">Thrown when no snapshot store is registered, or the actor does not implement <see cref="ISnapshotable"/>.</exception>
+	/// <exception cref="KeyNotFoundException">Thrown when no actor with <paramref name="handle"/> exists.</exception>
+	public async Task<ActorSnapshot?> RestoreActorSnapshotAsync(ActorHandle handle, string actorKey, long? generation = null,
+		CancellationToken cancellationToken = default)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(actorKey);
+		ThrowIfDisposed();
+		var store = _snapshotStore ??
+			throw new InvalidOperationException("No snapshot store is registered. Call UseSnapshotStore before restoring snapshots.");
+		var (host, snapshotable) = ResolveSnapshotableActor(handle);
+
+		// Store I/O deliberately happens before the mailbox message is enqueued: the actor loop is
+		// not blocked while the store reads, and the payload applied on the loop is already loaded.
+		var snapshot = await store.LoadAsync(new ActorSnapshotKey(actorKey, generation), cancellationToken).ConfigureAwait(false);
+		if (snapshot is null)
+		{
+			return null;
+		}
+
+		var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var envelope = CreateEnvelope(handle, ActorHandle.None, CallType.Send, new SnapshotRestoreRequested(handle));
+		var message = new MailboxMessage(envelope, async token =>
+		{
+			try
+			{
+				await snapshotable.RestoreSnapshotAsync(snapshot.Payload, token).ConfigureAwait(false);
+				completion.TrySetResult(true);
+			}
+			catch (Exception exception)
+			{
+				completion.TrySetException(exception);
+			}
+		});
+
+		await host.EnqueueAsync(message, cancellationToken).ConfigureAwait(false);
+		await AwaitSnapshotHookAsync(completion, host, handle, "snapshot restore", cancellationToken).ConfigureAwait(false);
+		return snapshot;
+	}
+
+	/// <summary>
+	/// Resolves the host and the <see cref="ISnapshotable"/> view of the target actor, failing fast
+	/// with distinct errors when the actor does not exist or has not opted into persistence.
+	/// </summary>
+	private (ActorHost Host, ISnapshotable Snapshotable) ResolveSnapshotableActor(ActorHandle handle)
+	{
+		if (!TryGetActorHost(handle, out var host))
+		{
+			throw new KeyNotFoundException($"Actor with handle {handle.Value} does not exist.");
+		}
+
+		if (host.Actor is not ISnapshotable snapshotable)
+		{
+			throw new InvalidOperationException(
+				$"Actor of type '{host.Actor.GetType().FullName}' does not implement ISnapshotable " +
+				"and does not participate in snapshot persistence.");
+		}
+
+		return (host, snapshotable);
+	}
+
+	/// <summary>
+	/// Awaits the completion of a snapshot hook callback that runs on the actor's message loop.
+	/// Guards against the actor stopping before the queued callback ran (the mailbox drops pending
+	/// messages on shutdown), which would otherwise leave the caller awaiting forever.
+	/// </summary>
+	private static async Task<T> AwaitSnapshotHookAsync<T>(TaskCompletionSource<T> completion, ActorHost host,
+		ActorHandle handle, string operation, CancellationToken cancellationToken)
+	{
+		var finished = await Task.WhenAny(completion.Task, host.Stopped).ConfigureAwait(false);
+		if (finished != completion.Task)
+		{
+			// The actor stopped first. Prefer the hook's own outcome when it completed concurrently
+			// with the shutdown; otherwise the queued callback was dropped by the mailbox.
+			if (completion.Task.IsCompleted)
+			{
+				return await completion.Task.ConfigureAwait(false);
+			}
+
+			throw new InvalidOperationException(
+				$"Actor {handle.Value} stopped before the {operation} hook was dispatched; the operation was abandoned.");
+		}
+
+		return await completion.Task.ConfigureAwait(false);
 	}
 
 	/// <summary>
