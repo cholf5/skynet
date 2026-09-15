@@ -55,7 +55,23 @@
   （基线 231 + 新增 15）。
 
 ## Review 意见
-（待填）
+- PM 审查 LoggingHotReloadProvider：Volatile int 编码（int.MinValue 哨兵）实现无锁热路径，
+  ReloadableLogger 每次 Log/IsEnabled 重读级别（热 reload 生效机制正确），LogLevel.None 显式拒绝，
+  pass-through（null = sink 决定）语义清晰；sink 所有权归调用方、Dispose 不释放 sink，文档与实现一致。
+- DebugConsoleCommandProcessor 接线：可选 provider 参数默认 null，向后兼容；未配置/无参/设置/非法值
+  四条路径完整，previous 级别回显。
+- 任务卡"文件监视"子项按可选处理未实现，以运行时改级方案替代——PRD 只要求热 reload，PM 认可该取舍。
+- 生效范围前提（宿主需经挂载 provider 的 LoggerFactory 创建 logger）已在 docs 写明，避免静默无效的误用。
+- 结论：**通过**。
 
 ## QA 记录
-（待填）
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | `loglevel` 查询当前级别 | ✅ Show_Current_Minimum_Level |
+| 2 | `loglevel Debug` 后新日志立即生效 | ✅ Set_Level_Rejects_Below（Fake sink 验证 IsEnabled + 实际写入） |
+| 3 | 非法级别名报错且级别不变 | ✅ Unknown_Level_Keeps_Previous |
+| 4 | 无 provider 时友好提示 | ✅ Not_Configured 路径（processor + 集成） |
+| 5 | 并发运行时改级 | ✅ provider 并发用例 |
+| 6 | PM 独立复跑全量测试 | ✅ 246/246（Skynet.sln，net10.0） |
+
+无 P0/P1 问题。**QA Passed**
