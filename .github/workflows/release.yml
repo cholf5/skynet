@@ -49,10 +49,13 @@ jobs:
           if-no-files-found: error
 
       - name: Publish to NuGet.org
-        if: secrets.NUGET_API_KEY != ''
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "NUGET_API_KEY secret is not set; skipping publish to NuGet.org"
+            exit 0
+          fi
           for package in artifacts/nuget/*.nupkg; do
             [ -f "$package" ] || continue
             dotnet nuget push "$package" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
