@@ -1,0 +1,8 @@
+{
+  "Scenario": "local-tell",
+  "DurationSeconds": 5.003,
+  "Concurrency": 1,
+  "TotalOps": 8201188,
+  "OpsPerSecond": 1639176.8886353641,
+  "Latency": null
+}

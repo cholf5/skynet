@@ -41,7 +41,7 @@ dotnet pack Skynet.sln --configuration Release
 
 ## Architecture Overview
 
-Skynet is an Actor framework for .NET 9.0 inspired by cloudwu/skynet, focused on game backend development.
+Skynet is an Actor framework for .NET 10.0 inspired by cloudwu/skynet, focused on game backend development.
 
 ### Core Components
 
@@ -86,7 +86,7 @@ Skynet is an Actor framework for .NET 9.0 inspired by cloudwu/skynet, focused on
 
 ### Development Guidelines
 
-- C# 13 (.NET 9.0), Allman braces, Tab indentation
+- C# 14 (.NET 10.0), Allman braces, Tab indentation
 - Async methods return `Task`/`Task<T>`, never `async void`
 - Use MessagePack for serialization, no reflection-based serialization
 - Microsoft.Extensions.Logging for structured logging

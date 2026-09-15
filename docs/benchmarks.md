@@ -33,29 +33,29 @@ scripts/run-benchmarks.sh 5
 
 记录环境：
 
-- 日期：2026-09-15
+- 日期：2026-09-15（E-11 升级到 .NET 10 后重新记录）
 - 硬件：Apple M2，8 GB RAM，macOS 26.5（arm64）
-- 运行时：.NET Runtime 10.0.1（仓库目标 net9.0；本机无 9.0 runtime，以 `DOTNET_ROLL_FORWARD=LatestMajor`
-  运行，脚本内置该兜底。CI（GitHub Actions ubuntu-latest）安装 9.0.x，预期数据接近）
+- 运行时：.NET Runtime 10.0.1（仓库自 E-11 起目标 net10.0）
 - 构建：Release
 
 | 场景 | 并发 | 吞吐（ops/s） | p50 (ms) | p90 (ms) | p99 (ms) |
 |------|------|--------------:|---------:|---------:|---------:|
-| local-tell  | 1 | 1,657,988 | — | — | — |
-| local-tell  | 4 | 1,287,890 | — | — | — |
-| local-call  | 1 |   518,868 | 0.158 | 0.246 | 0.625 |
-| local-call  | 4 |   629,552 | 0.538 | 0.938 | 1.971 |
-| remote-call | 1 |    21,910 | 4.279 | 6.442 | 10.188 |
+| local-tell  | 1 | 1,639,177 | — | — | — |
+| local-tell  | 4 | 1,251,783 | — | — | — |
+| local-call  | 1 |   470,311 | 0.167 | 0.296 | 0.629 |
+| local-call  | 4 |   615,055 | 0.512 | 0.950 | 2.204 |
+| remote-call | 1 |    19,896 | 4.612 | 7.117 | 12.896 |
 
+所有数字均为 .NET 10 升级后同轮实测（并发 4 的两次补充测量结果以独立文件归档）。
 原始输出与 JSON 见 `benchmarks/results/`（文件名含时间戳）。
 
 ### 解读
 
-- 单 actor 消息处理吞吐（local-tell ~166 万 msg/s）满足 AGENTS.md 的 ≥ 10 万条/s 目标一个数量级以上。
-- 本地 call RTT p50 0.16 ms，满足 PRD "本地 call 延迟尽可能低" 的预期（目标 < 1 ms）。
-- 并发从 1 提升到 4 时 local-call 吞吐 +21%，说明单 actor mailbox 是吞吐瓶颈，符合 actor 串行语义；
+- 单 actor 消息处理吞吐（local-tell ~164 万 msg/s）满足 AGENTS.md 的 ≥ 10 万条/s 目标一个数量级以上。
+- 本地 call RTT p50 0.17 ms，满足 PRD "本地 call 延迟尽可能低" 的预期（目标 < 1 ms）。
+- 并发从 1 提升到 4 时 local-call 吞吐 +31%，说明单 actor mailbox 是吞吐瓶颈，符合 actor 串行语义；
   local-tell 吞吐下降是生产者背压与单消费者结构所致。
-- remote-call 的主要成本是 TCP loopback RTT + MessagePack 序列化，p99 约 10 ms，可用于容量规划参考。
+- remote-call 的主要成本是 TCP loopback RTT + MessagePack 序列化，p99 约 13 ms，可用于容量规划参考。
 - 偶发 max 尾延迟（百毫秒级）来自 GC 停顿，属正常现象；评估时请以 p99 为准。
 
 ## 复现与回归

@@ -6,7 +6,7 @@
 
 1. 阅读 [docs/PRD.md](docs/PRD.md) 与 [AGENTS.md](AGENTS.md)，了解项目目标、架构与编码规范。
 2. 在 [kanban/board.md](kanban/board.md) 上认领或创建任务，并同步任务状态。
-3. 安装 .NET 9 SDK，并确保可以执行 `dotnet build` 与 `dotnet test`。
+3. 安装 .NET 10 SDK，并确保可以执行 `dotnet build` 与 `dotnet test`。
 
 ## 开发流程
 

@@ -25,11 +25,11 @@ Skynet.sln
 
 ## 开发环境
 
-- .NET SDK 9.0 (preview/RC)
-- 推荐使用 Visual Studio 2022 17.11+ 或 Rider 2024.2+
-- 操作系统：Windows、macOS 或任意支持 .NET 9 的 Linux 发行版
+- .NET SDK 10.0
+- 推荐使用 Visual Studio 2026 或 Rider 2025.1+
+- 操作系统：Windows、macOS 或任意支持 .NET 10 的 Linux 发行版
 
-> 若本地未安装 .NET 9，可执行 `./dotnet-install.sh --version 9.0.100-rc.1.24452.12 --install-dir ~/.dotnet` 并将 `~/.dotnet` 添加到 `PATH`。
+> 若本地未安装 .NET 10，可执行 `./dotnet-install.sh --channel 10.0 --install-dir ~/.dotnet` 并将 `~/.dotnet` 添加到 `PATH`。
 
 ## 快速开始
 

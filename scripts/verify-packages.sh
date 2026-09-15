@@ -21,11 +21,31 @@ popd >/dev/null
 
 pushd "${SAMPLE_DIR}" >/dev/null
   echo "Creating verification console app under ${SAMPLE_DIR}"
-  dotnet new console --framework net9.0
+  dotnet new console --framework net10.0
   cp "${REPO_ROOT}/nuget.config" ./nuget.config
-  dotnet nuget add source "${OUTPUT_DIR}" --name skynet-local --configfile nuget.config 2>/dev/null || true
+  # The repo nuget.config already defines the "skynet-local" source with a repo-relative path;
+  # retarget it to the freshly packed output instead of registering a duplicate source name.
+  sed -i.bak "s|value=\"./artifacts/nuget\"|value=\"${OUTPUT_DIR}\"|" ./nuget.config && rm ./nuget.config.bak
+  local_version="$(ls "${OUTPUT_DIR}" | grep -m1 'Skynet\.Core\..*\.nupkg$' | sed 's/Skynet\.Core\.\(.*\)\.nupkg/\1/')"
+  project_file="$(basename "${SAMPLE_DIR}").csproj"
+  echo "Referencing Skynet.Core ${local_version} from the local source"
+  # Overwrite the template csproj wholesale so the local package reference is the only addition.
+  cat > "${project_file}" <<REF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Skynet.Core" Version="${local_version}" />
+  </ItemGroup>
+</Project>
+REF
+  # Restore with the copied nuget.config so packageSourceMapping routes Skynet.* to the local
+  # source and transitive dependencies to nuget.org.
   dotnet restore --configfile nuget.config
-  dotnet add package Skynet.Core --source "${OUTPUT_DIR}" --configfile nuget.config
   cat <<'SRC' > Program.cs
 using System;
 using System.Threading.Tasks;
@@ -35,10 +55,9 @@ internal class Program
 {
   private static async Task Main()
   {
-    await using var system = new ActorSystem(new ActorSystemOptions
-    {
-      TransportFactory = () => new InProcTransport(new InProcTransportOptions())
-    });
+    await using var system = new ActorSystem(
+      options: new ActorSystemOptions(),
+      transportFactory: sys => new InProcTransport(sys, new InProcTransportOptions()));
 
     Console.WriteLine($"Skynet ActorSystem ready: {system != null}");
   }

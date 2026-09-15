@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>preview</LangVersion>
@@ -37,6 +37,10 @@
     <Title Condition="'$(Title)' == ''">$(MSBuildProjectName)</Title>
     <Description Condition="'$(Description)' == ''">Skynet actor framework component $(MSBuildProjectName).</Description>
   </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)docs/nuget/package-readme.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' != 'true'">
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

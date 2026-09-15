@@ -8,6 +8,8 @@
 		<IsPackable>true</IsPackable>
 		<AssemblyName>Skynet.Generators</AssemblyName>
 		<IsRoslynComponent>true</IsRoslynComponent>
+		<!-- Analyzer-only package (no lib/ output): NU5128 false-positives on the nuspec TFM match. -->
+		<NoWarn>$(NoWarn);NU5128</NoWarn>
 	</PropertyGroup>
 
 	<ItemGroup>

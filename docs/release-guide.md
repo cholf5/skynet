@@ -48,6 +48,6 @@ NUGET_API_KEY=<your-key> ./scripts/publish-packages.sh
 | --- | --- |
 | `dotnet pack` 找不到 `package-readme.md` | 确认仓库中存在 `docs/nuget/package-readme.md` 并未被移动。 |
 | 发布流水线无法访问 NuGet | 检查 `NUGET_API_KEY` 是否在仓库或组织层面配置为机密，并确认 Actions 允许访问。 |
-| 验证脚本在 CI 中失败 | 请确保在运行脚本前安装 .NET 9 SDK，并在 Linux 环境下执行（脚本使用 Bash 语法）。 |
+| 验证脚本在 CI 中失败 | 请确保在运行脚本前安装 .NET 10 SDK，并在 Linux 环境下执行（脚本使用 Bash 语法）。 |
 
 更多背景信息可参考 [`docs/PRD.md`](PRD.md) 以及各模块的专属文档（如 [`docs/redis-registry.md`](redis-registry.md)、[`docs/rooms.md`](rooms.md) 等）。

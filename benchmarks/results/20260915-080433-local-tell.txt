@@ -1,0 +1,7 @@
+scenario:     local-tell
+duration:     5.003s
+concurrency:  1
+total ops:    8201188
+ops/sec:      1,639,177
+
+JSON results written to benchmarks/results/20260915-080433-local-tell.json
