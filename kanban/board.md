@@ -13,7 +13,7 @@
 - _None_
 
 ## In Progress
-- _None_
+- [ ] [E-11 升级到 .NET 10（net9.0 → net10.0）](issues/E-11-dotnet-10-upgrade.md) — Owner: AI Agent — Complexity: M
 
 ## In Review
 - _None_
