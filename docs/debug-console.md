@@ -42,6 +42,7 @@ nc 127.0.0.1 4015
 | `list` | 输出所有 Actor 的 handle、名称、队列长度、累计处理次数、异常数与 trace 状态 |
 | `info <id|name>` | 显示指定 Actor 的详细指标快照（最后入队/处理时间、平均耗时等） |
 | `trace <id|name> [on|off]` | 切换或明确开启/关闭指定 Actor 的 trace 记录，在 Actor 日志中输出前后处理日志 |
+| `loglevel [level]` | 查看或修改运行时最小日志级别（需在启动时接入 `LoggingHotReloadProvider`，详见下文） |
 | `kill <id|name>` | 请求停止指定 Actor（等价于调用 `ActorSystem.KillAsync`） |
 | `exit` | 关闭当前控制台连接 |
 
@@ -54,6 +55,51 @@ nc 127.0.0.1 4015
 - **Exceptions**：执行 `ReceiveAsync` 抛出的异常次数。
 - **Average Processing**：处理单条消息的平均耗时（毫秒），基于累计 ticks 计算。
 - **Trace**：是否开启 trace 日志。开启后 ActorHost 会在处理前后输出 Info/Warning/Error 日志。
+
+## 运行时调整日志级别（loglevel）
+
+`Skynet.Extras` 内置 `LoggingHotReloadProvider`（基于 `ILoggerProvider`），允许在进程不重启的前提下调整最小日志级别。它持有一个可运行时修改的 `MinimumLevel`，其创建的每个 logger 在**每次写日志时**都会重新读取该级别，因此修改对新产生的日志立即生效。
+
+### 接入方式
+
+把 provider 同时挂到用于创建 `ActorSystem`（及其他组件）logger 的 `ILoggerFactory` 上，并把**同一个 provider 实例**传给调试控制台：
+
+```csharp
+var hotReload = new LoggingHotReloadProvider(minimumLevel: LogLevel.Information);
+
+using var loggerFactory = LoggerFactory.Create(builder =>
+{
+        // LoggerFactory 默认会把低于 Information 的记录过滤掉；
+        // 放宽到 Trace，让热 reload provider 成为唯一的级别开关。
+        builder.AddFilter(null, LogLevel.Trace);
+        builder.AddProvider(hotReload);
+});
+
+await using var system = new ActorSystem(loggerFactory);
+var gateway = new ActorSystemDebugConsoleGateway(system);
+await using var console = new DebugConsoleServer(gateway, logLevelProvider: hotReload);
+```
+
+`LoggingHotReloadProvider` 本身不输出日志，它包装一个真正落地的 sink provider（构造函数第一个参数，可选，例如来自 Serilog/NLog/自研 console provider）。未提供 sink 时，记录经级别过滤后被丢弃（内部转发到 `NullLogger`）。sink 的生命周期由调用方管理，provider 的 `Dispose` 不会释放它。
+
+### 命令行为
+
+| 命令 | 行为 |
+| --- | --- |
+| `loglevel` | 显示当前生效的最小级别，例如 `Current minimum log level: Information.` |
+| `loglevel Debug` | 修改最小级别（大小写不敏感），返回新旧级别，例如 `Minimum log level set to Debug (previous: Information).` |
+| `loglevel Verbose` | 非法级别名时返回错误并列出合法值，当前级别保持不变 |
+
+合法级别名与 `Microsoft.Extensions.Logging.LogLevel` 枚举一致：`Trace`、`Debug`、`Information`、`Warning`、`Error`、`Critical`、`None`。`None` 表示关闭所有经由该 provider 的日志输出。
+
+### 生效范围与前提
+
+热 reload 只影响**经由挂载了该 provider 的 `ILoggerFactory` 创建出来的 logger**：
+
+- `ActorSystem` 默认使用 `NullLoggerFactory.Instance`，示例代码也大量使用 `NullLogger` / `NullLoggerFactory`。此时日志本来就不会输出，`loglevel` 命令即使可用也不会有任何可观察效果——宿主必须像上文那样把 skynet 组件的 logger 经由该 provider 创建，`loglevel` 才能影响它们。
+- 直接以 `NullLogger<T>.Instance` 等硬编码方式注入的组件 logger 不经过 provider，同样不受影响。
+- 若 `DebugConsoleServer` / `DebugConsoleCommandProcessor` 未传入 provider，`loglevel` 命令会返回 "not configured" 的提示，说明如何接入。
+- `provider.MinimumLevel = null` 表示 provider 侧不做过滤（pass-through），是否输出完全由 sink 决定；此时 `loglevel` 查询会显示 `not configured`。
 
 ## 安全与部署建议
 

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Microsoft.Extensions.Logging;
 
 namespace Skynet.Extras;
 
@@ -14,19 +15,31 @@ public sealed class DebugConsoleCommandProcessor
 		"list                 - Display all registered actors and key metrics",
 		"info <id|name>       - Display detailed metrics for a specific actor",
 		"trace <id|name> [on|off] - Toggle or set tracing for an actor",
+		"loglevel [level]     - Show or set the runtime minimum log level",
 		"kill <id|name>       - Terminate an actor",
 		"exit                 - Close the current console session"
 	];
 
+	private const string NotConfiguredMessage =
+		"Log level hot reload is not configured. Create a LoggingHotReloadProvider, add it to the "
+		+ "ILoggerFactory that creates the actor system loggers, and pass the same provider to the debug console server.";
+
 	private readonly IDebugConsoleActorGateway _gateway;
+	private readonly LoggingHotReloadProvider? _logLevelProvider;
 
 	/// <summary>
 	/// Initializes a new instance of the <see cref="DebugConsoleCommandProcessor"/> class.
 	/// </summary>
-	public DebugConsoleCommandProcessor(IDebugConsoleActorGateway gateway)
+	/// <param name="gateway">Gateway used to inspect and control the actor system.</param>
+	/// <param name="logLevelProvider">
+	/// Optional provider backing the <c>loglevel</c> command. When omitted the command reports
+	/// that log level hot reload is not configured.
+	/// </param>
+	public DebugConsoleCommandProcessor(IDebugConsoleActorGateway gateway, LoggingHotReloadProvider? logLevelProvider = null)
 	{
 		ArgumentNullException.ThrowIfNull(gateway);
 		_gateway = gateway;
+		_logLevelProvider = logLevelProvider;
 	}
 
 	/// <summary>
@@ -53,6 +66,8 @@ public sealed class DebugConsoleCommandProcessor
 			return Task.FromResult(RenderInfo(tokens));
 			case "trace":
 			return Task.FromResult(RenderTrace(tokens));
+			case "loglevel":
+			return Task.FromResult(RenderLogLevel(tokens));
 			case "kill":
 			return ExecuteKillAsync(tokens, cancellationToken);
 			case "exit":
@@ -115,6 +130,50 @@ public sealed class DebugConsoleCommandProcessor
 		var state = enable ? "enabled" : "disabled";
 		var message = changed ? $"Tracing {state} for actor {handle.Value}." : $"Tracing already {state} for actor {handle.Value}.";
 		return new DebugConsoleCommandResult(message, false);
+	}
+
+	private DebugConsoleCommandResult RenderLogLevel(string[] tokens)
+	{
+		if (_logLevelProvider is null)
+		{
+			return new DebugConsoleCommandResult(NotConfiguredMessage, false);
+		}
+
+		if (tokens.Length < 2)
+		{
+			return new DebugConsoleCommandResult($"Current minimum log level: {FormatLogLevel(_logLevelProvider.MinimumLevel)}.", false);
+		}
+
+		if (!TryParseLogLevel(tokens[1], out var level))
+		{
+			return new DebugConsoleCommandResult(
+				$"Unknown log level '{tokens[1]}'. Valid levels: Trace, Debug, Information, Warning, Error, Critical, None.",
+				false);
+		}
+
+		var previous = _logLevelProvider.MinimumLevel;
+		_logLevelProvider.MinimumLevel = level;
+		return new DebugConsoleCommandResult($"Minimum log level set to {level} (previous: {FormatLogLevel(previous)}).", false);
+	}
+
+	private static bool TryParseLogLevel(string text, out LogLevel level)
+	{
+		switch (text.Trim().ToLowerInvariant())
+		{
+			case "trace": level = LogLevel.Trace; return true;
+			case "debug": level = LogLevel.Debug; return true;
+			case "information": level = LogLevel.Information; return true;
+			case "warning": level = LogLevel.Warning; return true;
+			case "error": level = LogLevel.Error; return true;
+			case "critical": level = LogLevel.Critical; return true;
+			case "none": level = LogLevel.None; return true;
+			default: level = default; return false;
+		}
+	}
+
+	private static string FormatLogLevel(LogLevel? level)
+	{
+		return level.HasValue ? level.Value.ToString() : "not configured";
 	}
 
 	private async Task<DebugConsoleCommandResult> ExecuteKillAsync(string[] tokens, CancellationToken cancellationToken)

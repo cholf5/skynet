@@ -24,13 +24,21 @@ public sealed class DebugConsoleServer : IAsyncDisposable
 	/// <summary>
 	/// Initializes a new instance of the <see cref="DebugConsoleServer"/> class.
 	/// </summary>
-	public DebugConsoleServer(IDebugConsoleActorGateway gateway, DebugConsoleOptions? options = null, ILogger<DebugConsoleServer>? logger = null)
+	/// <param name="gateway">Gateway used to inspect and control the actor system.</param>
+	/// <param name="options">Optional console listener options.</param>
+	/// <param name="logger">Optional logger for the console server itself.</param>
+	/// <param name="logLevelProvider">
+	/// Optional provider enabling the <c>loglevel</c> command. Pass the same
+	/// <see cref="LoggingHotReloadProvider"/> instance that was added to the
+	/// <see cref="ILoggerFactory"/> used to create the actor system loggers.
+	/// </param>
+	public DebugConsoleServer(IDebugConsoleActorGateway gateway, DebugConsoleOptions? options = null, ILogger<DebugConsoleServer>? logger = null, LoggingHotReloadProvider? logLevelProvider = null)
 	{
 		ArgumentNullException.ThrowIfNull(gateway);
 		_gateway = gateway;
 		_options = options ?? new DebugConsoleOptions();
 		_logger = logger ?? NullLogger<DebugConsoleServer>.Instance;
-		_processor = new DebugConsoleCommandProcessor(gateway);
+		_processor = new DebugConsoleCommandProcessor(gateway, logLevelProvider);
 	}
 
 	/// <summary>
