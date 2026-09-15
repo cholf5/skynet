@@ -72,6 +72,9 @@ Echo actor registered as 'echo'. Type messages to interact. Press ENTER on an em
 - [Gate 限流指南](docs/gate-rate-limiting.md)
 - [Prometheus 指标导出](docs/prometheus-metrics.md)
 - [基准测试与基线报告](docs/benchmarks.md)
+- [MsgServer 业务路由](docs/msg-server.md)
+- [放置策略](docs/placement.md)
+- [持久化插件](docs/persistence.md)
 
 ## 核心能力
 
