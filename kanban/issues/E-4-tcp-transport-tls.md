@@ -72,5 +72,28 @@
 ### Review 修复
 - 2026-09-15（R1，PM review 提出）：`AcceptLoopAsync` 入站处理中 `InitializeAsync` 抛异常时 catch 只做了 `client?.Dispose()`，`TcpConnection` 持有的 `_cts`、`_writeLock` 等一次性资源泄漏——每个 TLS 握手失败/被拒的入站连接漏一次。修复：`connection` 提升到 try 外声明，catch 中非空时 `await connection.DisposeAsync()`（与出站 `ConnectAsync` 失败路径同一套释放逻辑，DisposeCore 幂等且已包含 `_stream`（含 SslStream）与 `_client`，未写第二份释放代码），构造器自身失败（connection 尚未创建）时保留 `client?.Dispose()` 兜底；warning 日志保留。该路径由既有测试 2（明文客户端↔TLS 服务端）与测试 3（客户端拒证书，断言 "Failed to process incoming connection" 日志）覆盖。修复后全量 220/220 通过，新增 TLS 测试 3 次复跑全绿。
 
-### Review/QA
-（待填）
+### Review 意见
+- PM 逐行审查 TcpTransport.cs diff：TLS 握手挂 InitializeAsync 开头（集群握手帧之前），出站/入站方向语义正确；
+  `_stream` 泛化为 Stream 后仅在 InitializeAsync 内单线程替换，无并发交换窗口。
+- fail-fast 双向实证（毫秒级）：明文客户端→TLS 服务端（ClientHello 超过 MaxFrameBytes 被拒）；
+  TLS 客户端→明文服务端（SslStream 非法 record 抛 AuthenticationException）；极端 MaxFrameBytes 场景由
+  ConnectTimeout 兜底。
+- Review 发现 R1（已修复，fe31a99）：入站握手失败路径只 Dispose TcpClient，TcpConnection 的
+  _cts/_writeLock 泄漏；已改为与出站一致的 connection.DisposeAsync()，构造失败保留 client 兜底。
+- 选项命名平铺三属性（TlsServerCertificate / UseTls / RemoteCertificateValidationCallback）替代任务卡草拟的
+  复合对象，PM 认可；net10 的 SYSLIB0057 → X509CertificateLoader 用法正确。
+- 遗留限制已记录于 docs：无 mTLS、TargetHost 为 IP、无协议/套件旋钮；ConnectAsync 端口拒绝路径的
+  client/connectCts 泄漏为 pre-existing，另行跟踪。
+- 结论：**通过**。
+
+### QA 记录
+| # | 用例 | 结果 |
+|---|------|------|
+| 1 | 双端 TLS 自签证书 + 信任回调 → 远程 CallAsync | ✅ TcpTransportTlsTests（捕获对端证书指纹证明链路真实加密） |
+| 2 | 一端 TLS 一端明文 → 有限时间内失败 | ✅ Theory×2（双向），毫秒级 fail-fast |
+| 3 | 客户端证书校验拒绝 → 连接关闭可观测 | ✅ 服务端 warning 日志断言 |
+| 4 | 默认不配置 TLS 行为不变 | ✅ 既有 216 测试照常全绿 |
+| 5 | R1 修复回归 | ✅ 复跑 3 次全绿 |
+| 6 | PM 独立复跑全量测试 | ✅ 220/220（Skynet.sln，net10.0） |
+
+无 P0/P1 问题。**QA Passed**
