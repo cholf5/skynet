@@ -4,10 +4,10 @@
 - _None_
 
 ## To Do
-- [ ] [F-3 Skynet.Net.Tests 偶发失败排查与加固](issues/F-3-net-tests-flake-hardening.md) — Owner: AI Agent — Complexity: S/M
+- _None_
 
 ## In Progress
-- [ ] [F-2 ConnectAsync 端口拒绝路径资源泄漏修复](issues/F-2-connect-async-leak-fix.md) — Owner: AI Agent — Complexity: S
+- [ ] [F-3 Skynet.Net.Tests 偶发失败排查与加固](issues/F-3-net-tests-flake-hardening.md) — Owner: AI Agent — Complexity: S/M
 
 ## In Review
 - _None_
@@ -19,6 +19,7 @@
 - _None_
 
 ## Done
+- [x] [F-2 ConnectAsync 端口拒绝路径资源泄漏修复](issues/F-2-connect-async-leak-fix.md) — Owner: AI Agent — Complexity: S
 - [x] [F-1 ADR-0002 框架边界与生态引用策略（含 Extras 身份标注）](issues/F-1-adr-framework-boundary.md) — Owner: AI Agent — Complexity: S
 - [x] [E-10 Docker compose 与部署脚本完善](issues/E-10-docker-compose-deploy.md) — Owner: AI Agent — Complexity: S
 - [x] [E-9 Consistent hashing placement 策略](issues/E-9-consistent-hash-placement.md) — Owner: AI Agent — Complexity: S
